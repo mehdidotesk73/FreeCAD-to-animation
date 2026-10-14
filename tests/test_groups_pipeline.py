@@ -72,3 +72,20 @@ def test_ungrouped_bodies_are_hidden(sample_tree):
     cfg = _cfg(sample_tree, [{"name": "Main", "bodies": ["a", "b"]}])
     assert G.body_modes(cfg, sample_tree, "Main")["c"] == "hidden"
     assert G.HIDDEN_GROUP not in [g["name"] for g in cfg.to_dict()["groups"]]
+
+
+def test_step_view_override_lookup(sample_tree):
+    from cadanim.pipeline import ViewPlanner
+    cfg = G.from_dict({"source": "/tmp/x.FCStd", "groups": [{"name": "All", "bodies": ["a", "b", "c"]}],
+                       "camera": {"step_views": {"Shaft/Pad": {"azimuth": 0, "elevation": 0}}}},
+                      sample_tree)
+    vp = ViewPlanner.__new__(ViewPlanner)  # lookup and view math only, no probe
+    vp.cfg = cfg
+    vp.view_angle, vp.aspect = 24.0, 16 / 9
+    entry = dict(sample_tree["PadA"], label="Pad", body_label="Shaft")
+    ov = vp.step_override("PadA", entry)
+    assert ov == {"azimuth": 0, "elevation": 0}
+    view = vp._override_view(ov, [0, 0, 0], 10.0, None)
+    import numpy as np
+    from cadanim import camera as C
+    assert np.allclose(C.view_direction(view), [1, 0, 0])

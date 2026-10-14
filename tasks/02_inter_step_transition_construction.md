@@ -58,6 +58,24 @@ FreeCAD world is Z-up.
 All of these knobs live in the project config under `"camera"` (defaults in
 `groups.DEFAULT_CAMERA`).
 
+## Manual adjustments (viewer-side, no FreeCAD)
+
+Cameras only exist in the viewer. Every state's geometry is already in the
+model store, so re-framing never recompiles:
+
+* `camera.step_views` in the config, keyed by feature id, label or
+  `"BodyLabel/FeatureLabel"`:
+  ```json
+  "step_views": {"Pad": {"azimuth": 30, "elevation": 25, "zoom": 1.3},
+                 "Sketch012": {"direction": [0, -1, 0.3], "ghost": true},
+                 "Groove001": {"keep_previous": true}}
+  ```
+  Optional keys: `distance_scale` and `focal_offset`. Rerun `animate`;
+  transitions and holds are re-planned around the new view.
+* For frame-level edits, change `frames[i].camera` in `manifest.json` and run
+  `python -m cadanim rerender OUT --frames i-j`. Derived fields are
+  recomputed from `FocalPoint` / `Rotation` / `Distance`.
+
 ## Finale
 
 After the last step the camera moves to a three-quarter view fitted to the

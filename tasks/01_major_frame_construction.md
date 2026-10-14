@@ -46,9 +46,10 @@ For every state:
    Bodies without included solid features produce nothing.
 3. `doc.recompute()`, then record any included feature that is
    `Invalid`/`Error` (`info.errors`).
-4. Export the global-coordinate tessellation of each active body
-   (`shape.tessellate(deflection)`), plus the polylines of every included
-   sketch not yet consumed by an included feature (as `profile`).
+4. Write one binary STL per active body in global coordinates
+   (`shape.tessellate(deflection)`). Record the polylines of every included
+   sketch not yet consumed by an included feature (as `profile`) in
+   `info.json`.
 5. With `focus=True`, also describe the last visual step for camera
    planning: its bbox, its profile normal, the *changed material* mesh
    (additive tool, clipped removed material, or the symmetric difference
@@ -56,11 +57,15 @@ For every state:
    UpTo* sweeps).
 6. `closeDocument`. Nothing survives to the next state.
 
-Output: `<cache>/<key[:2]>/<key>.npz` (meshes) + `.json` (info). The key is
-`geometry_hash(state)` + deflection + `COMPILER_VERSION` (+ `_focus`).
+Output: the **model store** folder `<models>/<key>/` with `<Body>.stl`,
+`_focus.stl` (planning only) and `info.json` (written last, which marks the
+folder complete). The key is `geometry_hash(state)` + deflection +
+`COMPILER_VERSION` (+ `_focus`). FreeCAD never sees a camera.
 
 ### Pipeline side: `cadanim/geometry.py`
 
+* `load_model_dir(path)` reads a state folder (STLs + info) without
+  FreeCAD. The renderer and `rerender` use only this.
 * `GeometryCompiler.compile_many(states, focus)` de-duplicates by key,
   splits the misses over `workers` parallel `freecadcmd` processes and
   returns keys. Failed states are recorded (`info.failed`), and the
@@ -70,8 +75,8 @@ Output: `<cache>/<key[:2]>/<key>.npz` (meshes) + `.json` (info). The key is
 
 ### Rendering: `cadanim/render.py`
 
-FreeCAD's 3D view needs a display server, so frames are rendered with VTK
-offscreen from FreeCAD's tessellation:
+The viewer draws the stored STLs with VTK offscreen and applies the frame's
+camera:
 
 * colour per **group**, display mode per **body** (`solid`, `translucent`,
   `hidden`) from `groups.body_modes`

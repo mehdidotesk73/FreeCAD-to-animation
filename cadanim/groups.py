@@ -3,7 +3,8 @@
 A *group* is a set of bodies that belongs together physically. Typical uses:
 
 * ``"export": "union"``: the bodies are separately modelled modules that are
-  printed as one solid (fused into a single STL).
+  printed as one solid. Their meshes are written into a single STL; no
+  boolean fuse is needed because slicers merge touching shells.
 * ``"export": "separate"``: one STL per body.
 
 Every body of a group shares the group colour. While a step of group A is
@@ -82,6 +83,11 @@ DEFAULT_CAMERA = {
     "elevation_bias": 0.35,    # preference for looking from above
     "continuity_bias": 0.2,
     "probe_size": [240, 180],
+    # Manual per-step views, applied by the viewer (no FreeCAD rerun). Keyed by
+    # feature id, label or "BodyLabel/FeatureLabel". Each value may use
+    # direction [x,y,z] | azimuth/elevation (deg) | keep_previous, plus
+    # zoom, distance_scale, focal_offset [x,y,z] and ghost (bool).
+    "step_views": {},
 }
 
 

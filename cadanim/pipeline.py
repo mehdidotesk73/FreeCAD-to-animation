@@ -38,8 +38,11 @@ FRAME_INTER = "inter_step"
 FRAME_INTRA = "intra_step"
 
 
+_T0 = time.time()
+
+
 def _log(msg: str) -> None:
-    print(f"[cadanim] {msg}", file=sys.stderr, flush=True)
+    print(f"[cadanim {time.time() - _T0:6.0f}s] {msg}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -189,6 +192,31 @@ class ViewPlanner:
                      float(np.linalg.norm(center - fc)) + fr, 1.0)
         return center, radius
 
+    def step_override(self, step_id: str, entry: Mapping[str, Any]) -> Optional[dict]:
+        """``camera.step_views`` entry for a step (by feature id, label or "Body/Label")."""
+        table = self.cfg.camera.get("step_views") or {}
+        for k in (step_id, entry.get("label"), f"{entry.get('body_label')}/{entry.get('label')}"):
+            if k in table:
+                return table[k]
+        return None
+
+    def _override_view(self, ov: Mapping[str, Any], center, radius, prev_view):
+        """Manual view: keys direction | azimuth+elevation | keep_previous,
+        plus optional zoom, distance_scale and focal_offset."""
+        if ov.get("keep_previous") and prev_view is not None:
+            return prev_view
+        if "direction" in ov:
+            direction = C.normalize(ov["direction"])
+        elif "azimuth" in ov or "elevation" in ov:
+            direction = C.spherical(float(ov.get("azimuth", 45.0)), float(ov.get("elevation", 30.0)))
+        elif prev_view is not None:
+            direction = C.view_direction(prev_view)
+        else:
+            direction = C.spherical(45.0, 30.0)
+        center = np.asarray(center, float) + np.asarray(ov.get("focal_offset", [0, 0, 0]), float)
+        view = self._view(center, radius * float(ov.get("distance_scale", 1.0)), direction)
+        return C.complete_view({**view, "Zoom": float(ov.get("zoom", 1.0))})
+
     def _view(self, center, radius, direction):
         d = C.fit_distance(radius, self.view_angle, self.aspect, margin=float(self.cfg.camera["margin"]))
         return C.make_view(center, direction, d, view_angle=self.view_angle)
@@ -213,6 +241,16 @@ class ViewPlanner:
         # solid geometry it is being placed against.
         context_bbox = active_body_bbox or after.body_bbox(solid_bodies)
         center, radius = self._framing(focus_bbox, context_bbox)
+        occluders = [as_polydata(after.bodies[b]) for b in solid_bodies if b in after.bodies]
+
+        override = self.step_override(step_id, entry)
+        if override is not None:
+            view = self._override_view(override, center, radius, prev_view)
+            ghost = bool(override.get("ghost", False))
+            if "ghost" not in override and role == "sketch" and target is not None:
+                vis, tot = self.probe.measure(occluders, target, view, is_lines)
+                ghost = tot > 0 and vis / tot < 0.8
+            return view, ghost
 
         if role == "sketch" and focus.get("normal"):
             n = C.normalize(focus["normal"])
@@ -233,7 +271,6 @@ class ViewPlanner:
         if prev_dir is not None:
             cands = list(cands) + [prev_dir]
 
-        occluders = [as_polydata(after.bodies[b]) for b in solid_bodies if b in after.bodies]
         measured = []
         for d in cands:
             if target is None:
@@ -393,18 +430,46 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
 # Phase 3: compile, render, manifest
 # --------------------------------------------------------------------------
 def _render_chunk(args):
-    scene_d, cache_dir, deflection, source, requests = args
-    from .geometry import GeometryCompiler as GC
+    """Worker process: render requests from model folders (STLs). No FreeCAD."""
+    scene_d, requests = args
+    from .geometry import EMPTY, load_model_dir
     from .render import FrameRequest, Renderer, SceneSpec
-    scene = SceneSpec(**scene_d)
-    comp = GC(source, cache_dir, workers=1, deflection=deflection)
-    r = Renderer(scene)
+    r = Renderer(SceneSpec(**scene_d))
     try:
         for req in requests:
-            r.render(FrameRequest(**req), comp.load(req["geometry_key"]))
+            req = dict(req)
+            model = req.pop("model_dir")
+            geom = load_model_dir(model, req["geometry_key"]) if model else EMPTY
+            r.render(FrameRequest(**req), geom)
     finally:
         r.close()
     return len(requests)
+
+
+def render_requests(requests: List[dict], scene_d: dict, workers: int,
+                    log: Callable[[str], None] = _log) -> None:
+    if not requests:
+        return
+    nchunks = max(1, min(workers, len(requests)))
+    size = -(-len(requests) // nchunks)
+    chunks = [(scene_d, requests[i:i + size]) for i in range(0, len(requests), size)]
+    if len(chunks) == 1:
+        _render_chunk(chunks[0])
+    else:
+        import multiprocessing as mp
+        with ProcessPoolExecutor(max_workers=len(chunks), mp_context=mp.get_context("spawn")) as ex:
+            list(ex.map(_render_chunk, chunks))
+
+
+def _scene_dict(cfg: G.ProjectConfig) -> dict:
+    return {"body_group": cfg.body_to_group(), "colors": cfg.colors(), "style": dict(cfg.render)}
+
+
+def _clear_frames(frames_dir: str) -> None:
+    os.makedirs(frames_dir, exist_ok=True)
+    for old in os.listdir(frames_dir):
+        if old.startswith("frame_") and old.endswith(".png"):
+            os.remove(os.path.join(frames_dir, old))
 
 
 def render_timeline(tl: Timeline, cfg: G.ProjectConfig, compiler: GeometryCompiler, outdir: str,
@@ -417,51 +482,69 @@ def render_timeline(tl: Timeline, cfg: G.ProjectConfig, compiler: GeometryCompil
     kept: List[tuple] = []
     dropped = 0
     for f, k in zip(tl.frames, keys):
-        g = compiler.load(k)
-        if f.frame_type == FRAME_INTRA and not g.ok:
+        if f.frame_type == FRAME_INTRA and not compiler.load(k).ok:
             dropped += 1
             continue
         kept.append((f, k))
     if dropped:
         log(f"dropped {dropped} intra-step frame(s) whose intermediate state FreeCAD could not build")
 
-    frames_dir = os.path.join(outdir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-    for old in os.listdir(frames_dir):
-        if old.startswith("frame_") and old.endswith(".png"):
-            os.remove(os.path.join(frames_dir, old))
-    b2g = cfg.body_to_group()
-    scene_d = {"body_group": b2g, "colors": cfg.colors(), "style": dict(cfg.render)}
-    requests = []
-    for i, (f, k) in enumerate(kept):
-        reveal = {fid: e["render_reveal"] for fid, e in f.state.items()
-                  if fid != T.META_KEY and "render_reveal" in e}
-        requests.append({"geometry_key": k, "camera": f.camera,
-                         "output": os.path.join(frames_dir, f"frame_{i:05d}.png"),
-                         "active_group": f.group, "caption": f.caption, "reveal": reveal,
-                         "modes": dict(f.modes), "ghost_active": f.ghost_active})
-    log(f"rendering {len(requests)} frame(s) at {cfg.render['width']}x{cfg.render['height']} "
+    manifest = write_manifest(tl, cfg, kept, outdir, compiler)
+    _clear_frames(os.path.join(outdir, "frames"))
+    log(f"rendering {len(kept)} frame(s) at {cfg.render['width']}x{cfg.render['height']} "
         f"with {workers} worker(s)")
-    nchunks = max(1, min(workers, len(requests)))
-    size = -(-len(requests) // nchunks)
-    chunks = [requests[i:i + size] for i in range(0, len(requests), size)]
-    args = [(scene_d, compiler.cache_dir, compiler.deflection, compiler.source, c) for c in chunks]
-    if len(chunks) == 1:
-        _render_chunk(args[0])
-    else:
-        import multiprocessing as mp
-        with ProcessPoolExecutor(max_workers=len(chunks), mp_context=mp.get_context("spawn")) as ex:
-            list(ex.map(_render_chunk, args))
-    log(f"rendered in {time.time() - t0:.0f}s")
-    return write_manifest(tl, cfg, kept, outdir)
+    render_requests(_requests_from_manifest(manifest, outdir), _scene_dict(cfg), workers, log)
+    log(f"compiled + rendered in {time.time() - t0:.0f}s")
+    return manifest
 
 
-def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir: str) -> Dict[str, Any]:
+def _requests_from_manifest(manifest: Mapping[str, Any], outdir: str,
+                            indices: Optional[Sequence[int]] = None) -> List[dict]:
+    models = os.path.join(outdir, manifest["models_dir"])
+    frames = manifest["frames"] if indices is None else [manifest["frames"][i] for i in indices]
+    return [{"geometry_key": fr["geometry_key"],
+             "model_dir": os.path.join(models, fr["geometry_key"]) if fr["model"] else None,
+             "camera": fr["camera"],
+             "output": os.path.join(outdir, fr["file"]),
+             "active_group": fr["group"], "caption": fr["caption"], "reveal": fr["reveal"],
+             "modes": fr["context_modes"], "ghost_active": fr["ghost_active"]}
+            for fr in frames]
+
+
+def rerender(outdir: str, workers: int = 4, indices: Optional[Sequence[int]] = None,
+             log: Callable[[str], None] = _log) -> Dict[str, Any]:
+    """Re-draw frames from ``manifest.json`` + the stored STL models, without FreeCAD.
+
+    Edit a frame's ``camera`` (or ``config.json``'s render/colour settings)
+    and rerender. Cameras are viewer-side only.
+    """
+    with open(os.path.join(outdir, "manifest.json")) as fh:
+        manifest = json.load(fh)
+    with open(os.path.join(outdir, "config.json")) as fh:
+        cfg_d = json.load(fh)
+    tree = T.load(os.path.join(outdir, manifest["tree_file"]))
+    cfg = G.from_dict(cfg_d, tree, base_dir=outdir)
+    if indices is None:
+        _clear_frames(os.path.join(outdir, "frames"))
+    reqs = _requests_from_manifest(manifest, outdir, indices)
+    for r in reqs:
+        r["camera"] = C.complete_view(r["camera"])  # accept hand-edited views
+    t0 = time.time()
+    render_requests(reqs, _scene_dict(cfg), workers, log)
+    log(f"re-rendered {len(reqs)} frame(s) in {time.time() - t0:.0f}s (no FreeCAD)")
+    return manifest
+
+
+def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir: str,
+                   compiler: GeometryCompiler) -> Dict[str, Any]:
     fps = float(cfg.timing["fps"])
     full = tl.ordered_tree
+    models_rel = os.path.relpath(compiler.cache_dir, os.path.abspath(outdir))
     frames = []
     for i, (f, key) in enumerate(kept):
-        upto = T.last_feature(f.state)
+        g = compiler.load(key) if key else None
+        model = None if (not key or key == "empty") else f"{models_rel}/{key}"
+        stl = {b: f"{model}/{v.get('stl', b + '.stl')}" for b, v in (g.info.get("bodies", {}) if g else {}).items()} if model else {}
         frames.append({
             "index": i,
             "file": f"frames/frame_{i:05d}.png",
@@ -471,10 +554,16 @@ def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir
             "step_index": f.step_index,
             "group": f.group,
             "params": dict(f.params) if f.params else None,
+            "caption": f.caption,
             "camera": f.camera,
-            "geometry_key": key,
-            "state": {"upto": upto, "overrides": T.diff_overrides(full, f.state)},
+            "geometry_key": key or "empty",
+            "model": model,
+            "stl": stl,
+            "reveal": {fid: e["render_reveal"] for fid, e in f.state.items()
+                       if fid != T.META_KEY and "render_reveal" in e},
+            "ghost_active": f.ghost_active,
             "context_modes": dict(f.modes),
+            "state": {"upto": T.last_feature(f.state), "overrides": T.diff_overrides(full, f.state)},
         })
     steps = []
     for s in tl.steps:
@@ -496,6 +585,7 @@ def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir
         "groups": [{"name": g.name, "color": g.color, "export": g.export, "bodies": list(g.bodies)}
                    for g in cfg.groups],
         "tree_file": "tree.json",
+        "models_dir": models_rel,
         "steps": steps,
         "frames": frames,
     }
@@ -519,7 +609,7 @@ def run(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, outdir: str, *, cach
         f"({len(tl.frames) / float(cfg.timing['fps']):.1f}s at {cfg.timing['fps']} fps)")
     if plan_only:
         kept = [(f, compiler.cached_key(f.state) or "") for f in tl.frames]
-        manifest = write_manifest(tl, cfg, kept, outdir)
+        manifest = write_manifest(tl, cfg, kept, outdir, compiler)
     else:
         manifest = render_timeline(tl, cfg, compiler, outdir, workers, log)
     if T.fingerprint(full_tree) != fp:

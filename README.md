@@ -12,8 +12,14 @@ FCStd ──extract──▶ feature tree ──order/queue──▶ steps ─�
                                                    ├─ view per step (visibility-scored)
                                                    ├─ inter-step camera moves (SLERP/LERP)
                                                    └─ intra-step feature growth
-frames ──compile states in FreeCAD (parallel, cached)──▶ render (VTK offscreen) ──▶ PNGs + manifest.json (+ MP4)
+frames ──FreeCAD: STL per body per state (parallel, cached)──▶ viewer applies camera (VTK offscreen) ──▶ PNGs + manifest.json (+ MP4)
 ```
+
+FreeCAD only produces geometry: an STL per body for every finished step and
+every growth increment (`<out>/models/`). The camera lives entirely in the
+viewer, so camera tweaks (`camera.step_views` in the config, or edited
+cameras in `manifest.json` + `python -m cadanim rerender OUT`) never rerun
+FreeCAD.
 
 ## Quick start
 
@@ -43,7 +49,8 @@ Bodies are organised in **groups** (in `<model>.cadanim.json`):
 ```
 
 * One colour per group.
-* `union`: modules modelled separately but printed as one solid (fused STL).
+* `union`: modules modelled separately but printed as one solid. Their meshes
+  go into one STL with no boolean fuse; slicers merge touching shells.
   `separate`: one STL per body.
 * While a group is being animated, other bodies are shown according to
   `context`. Bodies the group is bound to (SubShapeBinders, i.e. mating
@@ -63,7 +70,8 @@ heuristics...).
 | `cadanim/tree.py` | Layer 1: immutable feature tree and pure state helpers |
 | `cadanim/fc/worker.py` | runs inside FreeCAD: extract, stateless compile, export, inspect |
 | `cadanim/fcbridge.py` | launches `freecadcmd` jobs (in parallel) |
-| `cadanim/geometry.py` | Layer 2: hash-keyed geometry cache, `tree_to_model` |
+| `cadanim/geometry.py` | Layer 2: hash-keyed STL model store, `tree_to_model` |
+| `cadanim/stl.py` | binary STL read/write (shared by FreeCAD side and viewer) |
 | `cadanim/render.py` | offscreen frame renderer and visibility probe |
 | `cadanim/camera.py` | view schema, quaternions, `interpolate_camera`, framing |
 | `cadanim/intra.py` | `create_intra_step_iterator`, feature-growth mapping |

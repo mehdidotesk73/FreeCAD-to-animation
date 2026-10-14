@@ -8,10 +8,13 @@ with ``CADANIM_JOB`` / ``CADANIM_RESULT`` pointing to the job and result
 files (see ``cadanim/fcbridge.py``). Supported actions:
 
 * ``extract``: FCStd -> feature tree (Layer 1 data)
-* ``compile``: list of tree states -> tessellated geometry per state
-  (Layer 2). Each state is built in a freshly opened document that is closed
-  afterwards, so there is no state between items.
-* ``export``: final tree + groups -> STL files (union / separate)
+* ``compile``: list of tree states -> one folder per state holding an STL
+  per body (plus info.json with sketches and focus data) (Layer 2). Each
+  state is built in a freshly opened document that is closed afterwards, so
+  there is no state between items. Cameras never reach FreeCAD; the viewer
+  applies them to these STLs.
+* ``export``: final tree + groups -> STL files (union = the group's bodies
+  written into one STL, no boolean fuse; separate = one STL per body)
 * ``inspect``: body overview, binder links and body contacts, used to propose
   groupings
 """
@@ -28,6 +31,7 @@ import FreeCAD  # noqa: F401  (provided by freecadcmd)
 import Part
 
 from cadanim import tree as T
+from cadanim.stl import write_stl
 
 SOLID_ROLES = ("additive", "subtractive", "pattern", "dressup")
 
@@ -372,17 +376,16 @@ def compile_state(source, state, deflection, focus):
                 errors.append({"feature": fid, "state": st})
 
         out = {"bodies": {}, "sketches": {}, "errors": errors}
-        arrays = {}
+        meshes = {}  # STL file stem -> (vertices, faces)
         for name, b in active.items():
             shp = b.Shape
             if shp.isNull():
                 continue
             shp = shp.copy()
             shp.Placement = b.getGlobalPlacement()
-            v, f = _tess(shp, deflection)
-            arrays[f"body:{name}:v"] = v
-            arrays[f"body:{name}:f"] = f
-            out["bodies"][name] = {"bbox": _bbox_list(shp.BoundBox), "volume": float(shp.Volume)}
+            meshes[name] = _tess(shp, deflection)
+            out["bodies"][name] = {"bbox": _bbox_list(shp.BoundBox), "volume": float(shp.Volume),
+                                   "stl": f"{name}.stl"}
 
         # Sketches that are included but not yet consumed by an included feature.
         consumed = set()
@@ -394,9 +397,9 @@ def compile_state(source, state, deflection, focus):
             if state[fid].get("role") == "sketch" and fid not in consumed:
                 sk = doc.getObject(fid)
                 lines = _sketch_polylines(sk, max(deflection * 0.5, 0.02))
-                for i, ln in enumerate(lines):
-                    arrays[f"sketch:{fid}:{i}"] = ln
-                out["sketches"][fid] = {"segments": len(lines), "body": state[fid].get("body")}
+                out["sketches"][fid] = {"body": state[fid].get("body"),
+                                        "polylines": [[[round(c, 5) for c in p] for p in ln]
+                                                      for ln in lines]}
 
         if focus:
             step = T.last_visual_feature(state)
@@ -405,42 +408,33 @@ def compile_state(source, state, deflection, focus):
                 if tool is not None and not tool.isNull():
                     v, f = _tess(tool, max(deflection * 3, 0.3))
                     if f:
-                        arrays["focus:v"] = v
-                        arrays["focus:f"] = f
+                        meshes["_focus"] = (v, f)
+                        info["stl"] = "_focus.stl"
                 out["focus"] = info
         out["seconds"] = round(time.time() - t0, 3)
-        return out, arrays
+        return out, meshes
     finally:
         FreeCAD.closeDocument(doc.Name)
 
 
-def _write_npz(path, arrays):
-    import numpy as np
-    packed = {}
-    for k, v in arrays.items():
-        if k.endswith(":f"):
-            packed[k] = np.asarray(v, dtype=np.int32).reshape(-1, 3)
-        else:
-            packed[k] = np.asarray(v, dtype=np.float32).reshape(-1, 3)
-    tmp = path + ".tmp.npz"
-    np.savez_compressed(tmp, **packed)
-    os.replace(tmp, path)
-
-
 def action_compile(job):
+    """Write ``<out>/<Body>.stl`` (+ ``_focus.stl``) and ``<out>/info.json`` per state."""
     results = []
     for item in job["items"]:
+        out_dir = item["out"]
         try:
-            info, arrays = compile_state(job["source"], item["state"], job.get("deflection", 0.1),
+            info, meshes = compile_state(job["source"], item["state"], job.get("deflection", 0.1),
                                          item.get("focus", False))
-            _write_npz(item["out"] + ".npz", arrays)
-            tmp = item["out"] + ".json.tmp"
+            os.makedirs(out_dir, exist_ok=True)
+            for stem, mesh in meshes.items():
+                write_stl(os.path.join(out_dir, stem + ".stl"), [mesh], header=f"cadanim {stem}")
+            tmp = os.path.join(out_dir, "info.json.tmp")
             with open(tmp, "w") as fh:
                 json.dump(info, fh)
-            os.replace(tmp, item["out"] + ".json")
-            results.append({"out": item["out"], "ok": True, "errors": info["errors"]})
+            os.replace(tmp, os.path.join(out_dir, "info.json"))  # written last = complete
+            results.append({"out": out_dir, "ok": True, "errors": info["errors"]})
         except Exception as exc:
-            results.append({"out": item["out"], "ok": False, "error": f"{exc}",
+            results.append({"out": out_dir, "ok": False, "error": f"{exc}",
                             "trace": traceback.format_exc()})
     return {"results": results}
 
@@ -449,25 +443,21 @@ def action_compile(job):
 # export
 # --------------------------------------------------------------------------
 def action_export(job):
-    import Mesh
-    import MeshPart
+    """Group STLs. A union group is its bodies' meshes in one file (no fuse)."""
     doc = FreeCAD.openDocument(job["source"], True)
     written = []
     try:
         _apply_state(doc, job["state"])
         doc.recompute()
         os.makedirs(job["outdir"], exist_ok=True)
-        lin = job.get("deflection", 0.05)
-        ang = job.get("angular", 0.2)
+        tol = job.get("deflection", 0.05)
+        safe = lambda n: "".join(c if c.isalnum() or c in "-_" else "_" for c in n)
 
-        def write(shape, fname):
-            m = MeshPart.meshFromShape(Shape=shape, LinearDeflection=lin,
-                                       AngularDeflection=ang, Relative=False)
+        def write(items, fname):
             path = os.path.join(job["outdir"], fname)
-            m.write(path)
-            written.append({"file": path, "facets": m.CountFacets,
-                            "volume": float(shape.Volume),
-                            "solids": len(shape.Solids)})
+            n = write_stl(path, [_tess(s, tol) for _, s in items], header=f"cadanim {fname}")
+            written.append({"file": path, "facets": n, "bodies": [b.Label for b, _ in items],
+                            "volume": float(sum(s.Volume for _, s in items))})
 
         for g in job["groups"]:
             shapes = []
@@ -480,20 +470,12 @@ def action_export(job):
                 shapes.append((b, s))
             if not shapes:
                 continue
-            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in g["name"])
             if g.get("export", "union") == "union":
-                fused = shapes[0][1]
-                if len(shapes) > 1:
-                    fused = fused.fuse([s for _, s in shapes[1:]])
-                try:
-                    fused = fused.removeSplitter()
-                except Exception:
-                    pass
-                write(fused, f"{safe}.stl")
+                write(shapes, f"{safe(g['name'])}.stl")
             else:
                 for b, s in shapes:
-                    lab = "".join(c if c.isalnum() or c in "-_" else "_" for c in b.Label)
-                    write(s, f"{safe}__{lab}.stl" if len(shapes) > 1 else f"{safe}.stl")
+                    name = f"{safe(g['name'])}__{safe(b.Label)}.stl" if len(shapes) > 1 else f"{safe(g['name'])}.stl"
+                    write([(b, s)], name)
         return {"written": written}
     finally:
         FreeCAD.closeDocument(doc.Name)

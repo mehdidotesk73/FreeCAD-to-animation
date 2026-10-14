@@ -1,11 +1,21 @@
 """Layer 2 - stateless geometric compiler.
 
-``GeometryCompiler.compile_many`` turns tree states into tessellated geometry
-by running FreeCAD in subprocesses. Every state is built from a freshly
-opened copy of the source document and then closed (see
-``cadanim/fc/worker.py``). The same state therefore always gives the same
-geometry, which makes it safe to cache results under the state's geometry
-hash (``tree.geometry_hash``). Render-only keys never cause a rebuild.
+``GeometryCompiler.compile_many`` turns tree states into STL models by
+running FreeCAD in subprocesses. Every state is built from a freshly opened
+copy of the source document and then closed (see ``cadanim/fc/worker.py``).
+The same state therefore always gives the same geometry, which makes it safe
+to cache results under the state's geometry hash (``tree.geometry_hash``).
+Render-only keys never cause a rebuild.
+
+Model store layout (one folder per state; every major frame and every growth
+increment gets one)::
+
+    <models>/<key>/info.json      bodies (bbox, volume, stl), sketches, focus, errors
+    <models>/<key>/<Body>.stl     one binary STL per body, global coordinates
+    <models>/<key>/_focus.stl     changed material of the step (planning only)
+
+Cameras are applied by the viewer to these STLs. Re-framing or re-rendering
+therefore never needs FreeCAD.
 
 ``tree_to_model`` is the single-frame entry point from the spec: compile
 (or load from cache) and render one PNG.
@@ -23,6 +33,7 @@ import numpy as np
 from . import fcbridge
 from . import tree as T
 from .fc import COMPILER_VERSION
+from .stl import read_stl
 
 Mesh = Tuple[np.ndarray, np.ndarray]  # (vertices Nx3 float32, faces Mx3 int32)
 
@@ -72,7 +83,10 @@ class GeometryCompiler:
         return h + ("_focus" if focus else "")
 
     def _base(self, key: str) -> str:
-        return os.path.join(self.cache_dir, key[:2], key)
+        return os.path.join(self.cache_dir, key)
+
+    def model_dir(self, key: str) -> Optional[str]:
+        return None if key == "empty" else self._base(key)
 
     def cached_key(self, state: dict, focus: bool = False) -> Optional[str]:
         """Existing cache key satisfying the request (a focus build satisfies a plain one)."""
@@ -80,7 +94,7 @@ class GeometryCompiler:
             return "empty"
         cands = [self.key(state, True)] if focus else [self.key(state), self.key(state, True)]
         for k in cands:
-            if os.path.exists(self._base(k) + ".json"):
+            if os.path.exists(os.path.join(self._base(k), "info.json")):
                 return k
         return None
 
@@ -96,7 +110,6 @@ class GeometryCompiler:
         if todo:
             items = []
             for k, s in todo.items():
-                os.makedirs(os.path.dirname(self._base(k)), exist_ok=True)
                 items.append({"state": s, "out": self._base(k), "focus": focus})
             # Interleave so each worker gets a similar mix of cheap/expensive states.
             nb = max(self.workers, -(-len(items) // self.batch_size))
@@ -111,7 +124,8 @@ class GeometryCompiler:
                 for item in r["results"]:
                     if not item["ok"]:
                         # Record the failure so callers can skip the state.
-                        with open(item["out"] + ".json", "w") as fh:
+                        os.makedirs(item["out"], exist_ok=True)
+                        with open(os.path.join(item["out"], "info.json"), "w") as fh:
                             json.dump({"failed": item["error"], "errors": [], "bodies": {},
                                        "sketches": {}}, fh)
         return [k or self.cached_key(s, focus) for s, k in zip(states, keys)]
@@ -125,27 +139,26 @@ class GeometryCompiler:
         return _load_geometry(self._base(key), key)
 
 
+def load_model_dir(path: str, key: Optional[str] = None) -> Geometry:
+    """Load a compiled state folder (info.json + STLs). No FreeCAD involved."""
+    return _load_geometry(os.path.abspath(path), key or os.path.basename(os.path.normpath(path)))
+
+
 @lru_cache(maxsize=64)
 def _load_geometry(base: str, key: str) -> Geometry:
-    with open(base + ".json") as fh:
+    with open(os.path.join(base, "info.json")) as fh:
         info = json.load(fh)
     bodies: Dict[str, Mesh] = {}
-    sketches: Dict[str, List[np.ndarray]] = {}
+    for name, b in info.get("bodies", {}).items():
+        path = os.path.join(base, b.get("stl", f"{name}.stl"))
+        if os.path.exists(path):
+            bodies[name] = read_stl(path)
+    sketches = {name: [np.asarray(l, dtype=np.float32) for l in sk.get("polylines", [])]
+                for name, sk in info.get("sketches", {}).items()}
     focus_mesh = None
-    if os.path.exists(base + ".npz"):
-        with np.load(base + ".npz") as z:
-            arrays = {k: z[k] for k in z.files}
-        for k, v in arrays.items():
-            kind, *rest = k.split(":")
-            if kind == "body" and rest[-1] == "v":
-                name = ":".join(rest[:-1])
-                bodies[name] = (v, arrays[f"body:{name}:f"])
-            elif kind == "sketch":
-                name = ":".join(rest[:-1])
-                sketches.setdefault(name, []).append((int(rest[-1]), v))
-        sketches = {n: [a for _, a in sorted(lst, key=lambda x: x[0])] for n, lst in sketches.items()}
-        if "focus:v" in arrays:
-            focus_mesh = (arrays["focus:v"], arrays["focus:f"])
+    fstl = (info.get("focus") or {}).get("stl")
+    if fstl and os.path.exists(os.path.join(base, fstl)):
+        focus_mesh = read_stl(os.path.join(base, fstl))
     return Geometry(key=key, bodies=bodies, sketches=sketches, focus_mesh=focus_mesh, info=info)
 
 

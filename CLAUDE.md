@@ -20,6 +20,11 @@ Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
 
 * FreeCAD is **not** importable from the system Python. Geometry work runs in
   `freecadcmd` subprocesses (`cadanim/fcbridge.py` -> `cadanim/fc/worker.py`).
+* **Division of labour.** FreeCAD only produces geometry: an STL per body
+  for every major frame (finished step) and every growth increment, stored in
+  the model store (`<out>/models/<state-key>/`). Cameras are applied by the
+  viewer (`cadanim/render.py`) to those STLs. Camera changes never need
+  FreeCAD.
   Install it with `scripts/install_freecad.sh` (FreeCAD 1.1.x AppImage,
   extracted to `/opt/freecad`), or point `CADANIM_FREECADCMD` at an existing
   `freecadcmd`.
@@ -39,7 +44,7 @@ Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
    * Bodies in the **same group share a colour**. Different groups get
      different colours.
    * `"export": "union"`: separately modelled modules that are printed as
-     **one solid**, fused into a single STL.
+     **one solid**: their meshes go into a single STL.
    * `"export": "separate"`: one STL per body.
    * Propose a grouping from the inspect report (touching bodies that print
      together, parts that print separately such as lids or roofs), then
@@ -57,13 +62,18 @@ Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
      but visible for as long as it exists.
    * `overrides`: `{"ActiveGroup": {"OtherGroup": "solid|translucent|hidden"}}`.
 4. **Export STLs**: `python -m cadanim export CONFIG [-o DIR]`.
-5. **Animate**:
+5. **Animate** (union groups export as the bodies' meshes in one STL; no
+   boolean fuse, since slicers merge touching shells):
    * quick look: `python -m cadanim animate CONFIG --preview --video`
    * final: `python -m cadanim animate CONFIG --video`
    * one group only: `--group Roof` (repeatable). Earlier groups are
      still built and shown per the context policy.
    * plan only, no rendering: `--plan-only` (writes the manifest).
    * a single frame for debugging: `python -m cadanim frame CONFIG --step Pad -o pad.png`
+   * **camera tweaks without FreeCAD**: either set `camera.step_views` in the
+     config and rerun `animate` (every state is already in the model store, so
+     only the viewer runs), or edit cameras in `manifest.json` and run
+     `python -m cadanim rerender OUT [--frames A-B] [--video]`.
 6. **Review** the output before handing it over: open a contact sheet of the
    last frame of every step (`manifest.json` -> `steps[].last_frame`) and
    watch the MP4. Tune `camera` / `timing` / `render` in the config rather
@@ -95,7 +105,7 @@ compile every unique state (parallel, cached) -> render every frame -> manifest.
   (they change geometry). Lower-case keys are metadata. `render_*` keys are
   presentation-only and excluded from the geometry hash.
 * **Determinism.** `compile(state)` must depend only on the state (and the
-  source file). The geometry cache is keyed by `geometry_hash(state)`,
+  source file). The model store is keyed by `geometry_hash(state)`,
   the tessellation deflection and `cadanim.fc.COMPILER_VERSION`. **Bump
   `COMPILER_VERSION`** whenever the worker's output for a state changes.
 * **Statelessness.** Every state is built in a freshly opened FreeCAD
@@ -112,6 +122,8 @@ compile every unique state (parallel, cached) -> render every frame -> manifest.
 
 ```
 <out>/frames/frame_00000.png ...   RGBA PNGs (transparent background)
+<out>/models/<key>/<Body>.stl      FreeCAD output: one STL per body per state
+<out>/models/<key>/info.json       bboxes, sketch polylines, focus data, errors
 <out>/manifest.json                frames[] and steps[] index (see below)
 <out>/tree.json                    the ordered full tree (reference for state deltas)
 <out>/config.json                  the effective config
@@ -120,11 +132,14 @@ compile every unique state (parallel, cached) -> render every frame -> manifest.
 
 Each `manifest.frames[i]` holds `file`, `timestamp`, `frame_type`
 (`static` | `inter_step` | `intra_step`), `step_id`, `step_index`, `group`,
-`params` (the growing parameter values), `camera`, `geometry_key`,
+`params` (the growing parameter values), `caption`, `camera`, `geometry_key`,
+`model` / `stl` (paths of that state's STLs), `reveal`, `ghost_active`,
 `context_modes` (body -> mode) and `state = {"upto": <last feature id>,
 "overrides": {feature: {prop: value}}}`. That pair reproduces the exact
 state from `tree.json`. `manifest.steps[]` gives each step's frame range,
-start time, view, ghosting and animation description.
+start time, view, ghosting and animation description. Together with the STLs
+the manifest is enough to re-render any frame (`rerender`) or to drive another
+viewer.
 
 ## Known limits
 
