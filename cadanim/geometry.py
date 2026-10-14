@@ -69,12 +69,15 @@ class CompileError(RuntimeError):
 
 class GeometryCompiler:
     def __init__(self, source: str, cache_dir: str, workers: int = 4, deflection: float = 0.1,
-                 batch_size: int = 12):
+                 batch_size: int = 12, prune: bool = True):
         self.source = os.path.abspath(source)
         self.cache_dir = os.path.abspath(cache_dir)
         self.workers = max(1, workers)
         self.deflection = deflection
         self.batch_size = batch_size
+        # Delete objects a state does not need before recompute (same geometry,
+        # far less work). False only for equivalence tests / debugging.
+        self.prune = prune
         os.makedirs(self.cache_dir, exist_ok=True)
 
     # -- cache layout ----------------------------------------------------
@@ -115,7 +118,7 @@ class GeometryCompiler:
             nb = max(self.workers, -(-len(items) // self.batch_size))
             batches = [items[i::nb] for i in range(nb) if items[i::nb]]
             jobs = [{"action": "compile", "source": self.source, "deflection": self.deflection,
-                     "items": b} for b in batches]
+                     "prune": self.prune, "items": b} for b in batches]
             if progress:
                 progress(f"compiling {len(items)} model state(s) in FreeCAD "
                          f"({len(jobs)} job(s), {self.workers} worker(s))")

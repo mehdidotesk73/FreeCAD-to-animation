@@ -44,18 +44,32 @@ For every state:
 2. `_apply_state`: write every upper-case property that differs from the
    document. Then set each body's `Tip` to its last included solid feature.
    Bodies without included solid features produce nothing.
-3. `doc.recompute()`, then record any included feature that is
+3. `_prune`: delete every object the state does not need from this
+   in-memory copy (never saved). Kept: the included features, everything
+   they depend on per FreeCAD's dependency graph (`OutListRecursive`:
+   profiles, base features, attachment faces, binder sources, expression
+   targets such as spreadsheets), and the owning bodies with their origins.
+   Without this, a change to an early body makes FreeCAD rebuild every
+   body linked to it through binders. On the bird feeder that took ~4 s per
+   state; pruned it takes ~0.1 s. `GeometryCompiler(prune=False)` disables it,
+   and `test_pruned_build_matches_full_build` checks that both builds give
+   identical geometry.
+4. `doc.recompute()`, then record any included feature that is
    `Invalid`/`Error` (`info.errors`).
-4. Write one binary STL per active body in global coordinates
+5. Write one binary STL per active body in global coordinates
    (`shape.tessellate(deflection)`). Record the polylines of every included
    sketch not yet consumed by an included feature (as `profile`) in
    `info.json`.
-5. With `focus=True`, also describe the last visual step for camera
+6. With `focus=True`, also describe the last visual step for camera
    planning: its bbox, its profile normal, the *changed material* mesh
    (additive tool, clipped removed material, or the symmetric difference
    for patterns/dress-ups) and `sweep_depth` (used to animate ThroughAll /
    UpTo* sweeps).
-6. `closeDocument`. Nothing survives to the next state.
+7. `closeDocument`. Nothing survives to the next state.
+
+`info.json` records `timing` per stage (open, apply, prune, recompute,
+tessellate, focus, write) and `pruned_objects`, so compile cost can be
+analysed from the model store.
 
 Output: the **model store** folder `<models>/<key>/` with `<Body>.stl`,
 `_focus.stl` (planning only) and `info.json` (written last, which marks the

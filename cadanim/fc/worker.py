@@ -362,12 +362,59 @@ def _focus_info(doc, state, step_id, active_bodies, deflection):
     return info, tool
 
 
-def compile_state(source, state, deflection, focus):
+def _prune(doc, included):
+    """Delete every object the state does not need, so recompute only touches the state.
+
+    Kept: the included features, everything they depend on according to
+    FreeCAD's own dependency graph (``OutListRecursive``: profiles, base
+    features, attachment faces, binder sources, expression targets such as
+    spreadsheets), and the owning bodies with their origins. Everything else
+    (later features, bodies not started yet) is removed from this in-memory
+    copy only; the file on disk is never saved. Returns the number removed.
+    """
+    keep = set()
+    for fid in included:
+        obj = doc.getObject(fid)
+        keep.add(obj.Name)
+        keep.update(o.Name for o in obj.OutListRecursive)
+        body = _owner_body(obj)
+        if body is not None:
+            keep.add(body.Name)
+            keep.add(body.Origin.Name)
+            keep.update(o.Name for o in body.Origin.OutListRecursive)
+    doomed = {o.Name for o in doc.Objects if o.Name not in keep}
+    removed = 0
+    while doomed:
+        # Remove objects nothing else still left in the document depends on.
+        ready = [n for n in doomed
+                 if doc.getObject(n) is None
+                 or not any(u.Name in doomed and u.Name != n for u in doc.getObject(n).InList)]
+        if not ready:  # dependency cycle among doomed objects: remove in reverse order
+            ready = [o.Name for o in reversed(doc.Objects) if o.Name in doomed][:1]
+        for n in ready:
+            doomed.discard(n)
+            if doc.getObject(n) is not None:
+                doc.removeObject(n)
+                removed += 1
+    return removed
+
+
+def compile_state(source, state, deflection, focus, prune=True):
     t0 = time.time()
+    timing = {}
     doc = FreeCAD.openDocument(source, True)
+    timing["open"] = time.time() - t0
     try:
+        t = time.time()
         included, active = _apply_state(doc, state)
+        timing["apply"] = time.time() - t
+        t = time.time()
+        removed = _prune(doc, included) if prune else 0
+        timing["prune"] = time.time() - t
+        t = time.time()
         doc.recompute()
+        timing["recompute"] = time.time() - t
+        t = time.time()
         errors = []
         for fid in included:
             o = doc.getObject(fid)
@@ -401,6 +448,8 @@ def compile_state(source, state, deflection, focus):
                                         "polylines": [[[round(c, 5) for c in p] for p in ln]
                                                       for ln in lines]}
 
+        timing["tessellate"] = time.time() - t
+        t = time.time()
         if focus:
             step = T.last_visual_feature(state)
             if step is not None:
@@ -411,6 +460,9 @@ def compile_state(source, state, deflection, focus):
                         meshes["_focus"] = (v, f)
                         info["stl"] = "_focus.stl"
                 out["focus"] = info
+        timing["focus"] = time.time() - t
+        out["pruned_objects"] = removed
+        out["timing"] = {k: round(v, 4) for k, v in timing.items()}
         out["seconds"] = round(time.time() - t0, 3)
         return out, meshes
     finally:
@@ -424,11 +476,13 @@ def action_compile(job):
         out_dir = item["out"]
         try:
             info, meshes = compile_state(job["source"], item["state"], job.get("deflection", 0.1),
-                                         item.get("focus", False))
+                                         item.get("focus", False), job.get("prune", True))
+            t = time.time()
             os.makedirs(out_dir, exist_ok=True)
             for stem, mesh in meshes.items():
                 write_stl(os.path.join(out_dir, stem + ".stl"), [mesh], header=f"cadanim {stem}")
             tmp = os.path.join(out_dir, "info.json.tmp")
+            info["timing"]["write"] = round(time.time() - t, 4)
             with open(tmp, "w") as fh:
                 json.dump(info, fh)
             os.replace(tmp, os.path.join(out_dir, "info.json"))  # written last = complete

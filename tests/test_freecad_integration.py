@@ -46,3 +46,28 @@ def test_through_all_pocket_focus_has_sweep_depth(tree, tmp_path, step):
     g = comp.compile(T.state_up_to(tree, step), focus=True)
     assert g.focus.get("bbox") is not None
     assert g.focus.get("sweep_depth", 0) > 0
+
+
+# Pruning removes everything a state does not need before recompute. It must
+# never change the geometry: compare against full-document builds.
+PRUNE_CASES = [("Pad", {"Length": 60.0}), ("Pocket004", None), ("Pocket", None),
+               ("Pad001", None), ("Groove001", {"Angle": 9.0}), ("Fillet", None)]
+
+
+@pytest.mark.parametrize("step,overrides", PRUNE_CASES)
+def test_pruned_build_matches_full_build(tree, tmp_path, step, overrides):
+    from cadanim.geometry import GeometryCompiler
+    st = T.state_up_to(tree, step)
+    if overrides:
+        st = T.with_overrides(st, step, overrides)
+    full = GeometryCompiler(MODEL, str(tmp_path / "full"), workers=1, prune=False).compile(st)
+    pruned = GeometryCompiler(MODEL, str(tmp_path / "pruned"), workers=1).compile(st)
+    assert full.ok and pruned.ok
+    assert pruned.info["pruned_objects"] > 0 or step == "Fillet"
+    assert set(pruned.bodies) == set(full.bodies)
+    for name, b in full.info["bodies"].items():
+        p = pruned.info["bodies"][name]
+        assert p["volume"] == pytest.approx(b["volume"], rel=1e-9)
+        assert p["bbox"] == pytest.approx(b["bbox"], abs=1e-6)
+        assert len(pruned.bodies[name][1]) == len(full.bodies[name][1])  # same tessellation
+    assert set(pruned.sketches) == set(full.sketches)
