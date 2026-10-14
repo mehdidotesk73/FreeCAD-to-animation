@@ -271,14 +271,13 @@ class ViewPlanner:
         if prev_dir is not None:
             cands = list(cands) + [prev_dir]
 
-        measured = []
-        for d in cands:
-            if target is None:
-                measured.append((d, 1, 1))
-                continue
-            vis, tot = self.probe.measure(occluders, target, self._view(center, radius, d), is_lines)
-            measured.append((d, vis, tot))
-        best_vis = max(m[1] for m in measured) or 1
+        # One render per candidate: visible target pixels past the solid context.
+        if target is not None:
+            self.probe.setup(occluders, target, is_lines)
+            measured = [(d, self.probe.visible(self._view(center, radius, d))) for d in cands]
+        else:
+            measured = [(d, 1) for d in cands]
+        best_vis = max(v for _, v in measured) or 1
 
         def score(d, vis):
             # sqrt: once most of the target is visible, a nicer angle matters more.
@@ -289,16 +288,20 @@ class ViewPlanner:
                 s += float(cam["continuity_bias"]) * max(0.0, float(np.dot(d, prev_dir)))
             return s
 
-        scored = [(score(d, v), d, v, t) for d, v, t in measured]
+        scored = [(score(d, v), d, v) for d, v in measured]
         best = max(scored, key=lambda x: x[0])
         chosen = best
         if prev_dir is not None:
             prev_entry = scored[-1]
             if prev_entry[0] >= float(cam["hysteresis"]) * best[0] and prev_entry[2] > 0:
                 chosen = prev_entry
-        _, direction, vis, tot = chosen
-        ghost = role == "sketch" and tot > 0 and vis / tot < 0.8
+        _, direction, vis = chosen
         view = self._view(center, radius, direction)
+        ghost = False
+        if role == "sketch" and target is not None:
+            # Only the chosen view needs the unobstructed size (1 extra render per step).
+            tot = self.probe.unoccluded(view)
+            ghost = tot > 0 and vis / tot < 0.8
 
         # Keep the previous view if it already frames this step well.
         if prev_view is not None and C.angle_between_views(view, prev_view) < 1.0:

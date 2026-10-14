@@ -23,6 +23,7 @@ import pyvista as pv  # noqa: E402
 
 pv.OFF_SCREEN = True
 
+from .camera import view_direction  # noqa: E402
 from .geometry import Geometry, Mesh  # noqa: E402
 
 
@@ -180,43 +181,69 @@ class Renderer:
 class VisibilityProbe:
     """Counts how many pixels of a target are visible from a viewpoint.
 
-    The target and the occluders are rendered separately into depth buffers.
-    A target pixel is visible when no occluder lies in front of it by more
-    than a small world-space tolerance, so faces the target shares with an
-    occluder (for example the walls of a fresh cut) count as visible.
+    One render per viewpoint: occluders are drawn black and the target red,
+    both unlit, and the surviving red pixels are counted. Faces the target
+    shares with an occluder (for example the walls of a fresh cut) must count
+    as visible, so the target is moved towards the camera by a small
+    world-space tolerance (0.4% of the camera distance) before drawing.
+
+    Usage per step: ``setup(occluders, target)`` once, then ``visible(view)``
+    for every candidate direction (1 render each), and ``unoccluded(view)``
+    only where the target's unobstructed size is needed (1 extra render).
     """
+
+    TOLERANCE = 0.004
 
     def __init__(self, size: Sequence[int] = (240, 180)):
         self.size = (int(size[0]), int(size[1]))
         self.p = pv.Plotter(off_screen=True, window_size=self.size, lighting="none")
         self.p.set_background("white")
-        self.p.show(auto_close=False)  # depth reads require an initial render
+        self.p.show(auto_close=False)  # screenshots require an initial render
+        self._target = None
+        self._occluders: List = []
 
     def close(self):
         self.p.close()
 
-    def _depth(self, meshes: Sequence[pv.PolyData], view: Mapping, lines: bool) -> np.ndarray:
+    def setup(self, occluders: Sequence[pv.PolyData], target: pv.PolyData,
+              target_is_lines: bool = False) -> None:
+        """Load one step's scene. No render happens here."""
         p = self.p
         p.clear_actors()
-        for m in meshes:
-            p.add_mesh(m, color="red", lighting=False, line_width=4.0 if lines else 1.0)
-        apply_camera(p, view)
-        p.render()
-        # Distances along the view axis (negative, closer = larger), NaN = empty.
-        return p.get_image_depth(fill_value=np.nan, reset_camera_clipping_range=False)
+        self._occluders = [p.add_mesh(o, color="black", lighting=False, render=False,
+                                      reset_camera=False) for o in occluders]
+        self._target = p.add_mesh(target, color="red", lighting=False, render=False,
+                                  reset_camera=False, line_width=4.0 if target_is_lines else 1.0)
+
+    def _count_red(self, view: Mapping) -> int:
+        # Nudge the target towards the camera (see class docstring).
+        nudge = view_direction(view) * self.TOLERANCE * float(view["Distance"])
+        self._target.position = tuple(nudge)
+        apply_camera(self.p, view)
+        self.p.render()       # the single render ...
+        img = self.p.image    # ... read back without re-rendering (screenshot() may return
+                              # a stale image here)
+        return int(((img[..., 0] > 180) & (img[..., 1] < 80) & (img[..., 2] < 80)).sum())
+
+    def visible(self, view: Mapping) -> int:
+        """Target pixels visible past the occluders (1 render)."""
+        return self._count_red(view)
+
+    def unoccluded(self, view: Mapping) -> int:
+        """Target pixels with the occluders hidden (1 render)."""
+        for a in self._occluders:
+            a.visibility = False
+        try:
+            return self._count_red(view)
+        finally:
+            for a in self._occluders:
+                a.visibility = True
 
     def measure(self, occluders: Sequence[pv.PolyData], target: pv.PolyData, view: Mapping,
-                target_is_lines: bool = False, tolerance: Optional[float] = None) -> Tuple[int, int]:
-        """(visible target pixels, unoccluded target pixels)."""
-        dt = self._depth([target], view, target_is_lines)
-        hit = ~np.isnan(dt)
-        total = int(hit.sum())
-        if not occluders or total == 0:
-            return total, total
-        do = self._depth(occluders, view, False)
-        tol = tolerance if tolerance is not None else 0.004 * float(view["Distance"])
-        visible = hit & (np.isnan(do) | (dt >= do - tol))
-        return int(visible.sum()), total
+                target_is_lines: bool = False) -> Tuple[int, int]:
+        """(visible, unoccluded) target pixels for one view (2 renders)."""
+        self.setup(occluders, target, target_is_lines)
+        return self.visible(view), self.unoccluded(view)
 
 
 def as_polydata(mesh: Mesh) -> pv.PolyData:

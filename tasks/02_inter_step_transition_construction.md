@@ -43,8 +43,16 @@ FreeCAD world is Z-up.
 3. **Candidates**: 30 standard directions (isometric octants, two elevated
    rings, six axes). Sketches use their plane normal (both sides) plus +/-25
    deg tilts.
-4. **Score** (`VisibilityProbe`, a 240x180 depth-buffer test): visible target
-   pixels past the *solid* context. Each score is
+4. **Score** (`VisibilityProbe`, 240x180, unlit): visible target pixels
+   past the *solid* context, measured with **exactly one render per
+   candidate**. The step's scene is loaded once (`setup`); per candidate only
+   the camera moves. Occluders are black and the target red, and red pixels
+   are counted. The target is nudged 0.4% of the camera distance towards the
+   camera so faces it shares with an occluder (cut walls) count as visible.
+   The unobstructed size (for ghosting) is measured only for the chosen view
+   (`unoccluded`, 1 extra render per sketch step). Read images with
+   `p.render()` + `p.image`; `p.screenshot()` can return a stale image there.
+   Each score is
    `sqrt(visible/best) + elevation_bias * elevation_preference(d)
    + continuity_bias * max(0, d . prev_d)`. Sketch scores are multiplied by
    `|d . normal|` (face-on).
