@@ -1,0 +1,4 @@
+numpy>=1.24
+pyvista>=0.44
+pillow>=10
+pytest>=8

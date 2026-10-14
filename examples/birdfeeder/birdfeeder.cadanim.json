@@ -1,0 +1,22 @@
+{
+  "source": "BirdFeeder.FCStd",
+  "groups": [
+    {
+      "name": "Feeder",
+      "color": "#4f7cac",
+      "export": "union",
+      "bodies": ["Shaft", "Base", "ShaftFastner", "Platform"]
+    },
+    {
+      "name": "Roof",
+      "color": "#e0a03a",
+      "export": "separate",
+      "bodies": ["Top"]
+    }
+  ],
+  "context": {
+    "default": "translucent",
+    "binding": "solid",
+    "overrides": {}
+  }
+}
