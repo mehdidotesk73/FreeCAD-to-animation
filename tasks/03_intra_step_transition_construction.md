@@ -35,15 +35,14 @@ Length pockets.
 | Pad / Pocket, `TwoLengths` | `Length`, `Length2` scaled together | |
 | Pad / Pocket, `ThroughAll` / `UpTo*` | temporary `Type=Length`, depth 0 -> `sweep_depth` | last frame restores the original Type exactly; `Midplane` doubles the depth |
 | Revolution / Groove, `Angle` | `Angle` 2% -> A | `TwoAngles` scales both |
-| PolarPattern | instances added one by one | `Angle` adjusted so each instance stays at its final position (full circle: A/n spacing; partial: A/(n-1)); `Mode=Spacing` only changes `Occurrences` |
-| LinearPattern | instances added one by one | `Length` adjusted likewise |
+| PolarPattern | all copies from the first frame, `Angle` 2% -> final | `Occurrences` fixed at its final value. Extent mode spaces copies A/(n-1), except a full 360 deg circle (A/n), so a full circle sweeps to 360(n-1)/n (identical layout, no jump) and the last frame restores 360. `Mode=Spacing` sweeps `Offset` instead |
+| LinearPattern | all copies from the first frame, `Length` 2% -> final | `Mode=Spacing` sweeps `Offset` instead |
 | Fillet / Chamfer / Draft | `Radius` / `Size` / `Angle` 2% -> value | |
 | others (Mirrored, MultiTransform, Thickness, Pipe, Loft, ...) | appear | `timing.appear_frames` static frames |
 
 `plan_growth(step_state, step_id, frames, focus, easing)` returns a
 `GrowthPlan(description, states, values)`, or `None` when the feature just
-appears. Continuous features use the configured easing; discrete patterns are
-sampled linearly so each instance gets equal time.
+appears. All behaviours use the configured easing.
 
 Intermediate states that FreeCAD cannot build (for example a fillet radius
 that is too large mid-way) are recorded as failed by the compiler and

@@ -93,7 +93,8 @@ def cmd_export(a):
 def _apply_preview(cfg: G.ProjectConfig) -> G.ProjectConfig:
     d = cfg.to_dict()
     d["render"].update(width=640, height=360, anti_aliasing=None)
-    for k in ("sketch_frames", "growth_frames", "transition_frames", "hold_frames", "finale_frames"):
+    for k in ("sketch_frames", "growth_frames", "transition_frames", "hold_frames", "finale_frames",
+              "sketch_fade_frames"):
         d["timing"][k] = max(1, int(d["timing"][k]) // 2)
     d["timing"]["fps"] = max(1, int(d["timing"]["fps"]) // 2)
     return d
@@ -143,7 +144,7 @@ def cmd_frame(a):
         from .render import FrameRequest
         r.render(FrameRequest(geometry_key=geom.key, camera=complete_view(view), output=a.output,
                               active_group=group, caption=a.step, modes=modes,
-                              ghost_active=ghost), geom)
+                              ghost=1.0 if ghost else 0.0), geom)
     finally:
         r.close()
     print(f"wrote {a.output}")

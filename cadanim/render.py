@@ -43,7 +43,9 @@ class FrameRequest:
     caption: Optional[str] = None
     reveal: Mapping[str, float] = field(default_factory=dict)
     modes: Mapping[str, str] = field(default_factory=dict)  # body -> solid/translucent/hidden
-    ghost_active: bool = False
+    ghost: float = 0.0  # 0..1: fade every body towards ghost_opacity (sketch steps)
+    # (model folder holding the sketch, sketch id, opacity): fading profile sketches
+    overlays: Sequence[Tuple[str, str, float]] = ()
 
 
 def _polydata(mesh: Mesh) -> pv.PolyData:
@@ -135,7 +137,9 @@ class Renderer:
             self._mesh_cache.popitem(last=False)
         return surf, edges
 
-    def render(self, req: FrameRequest, geom: Geometry) -> None:
+    def render(self, req: FrameRequest, geom: Geometry,
+               overlay_geoms: Optional[Mapping[str, Geometry]] = None) -> None:
+        """Draw one frame. ``overlay_geoms`` maps an overlay's model folder to its geometry."""
         st = self.scene.style
         p = self.plotter
         p.clear_actors()
@@ -145,11 +149,10 @@ class Renderer:
             if mode == "hidden":
                 continue
             color = self.scene.colors.get(group, "#aaaaaa")
-            opacity = 1.0
-            if mode == "translucent":
-                opacity = float(st["translucent_opacity"])
-            elif req.ghost_active and group == req.active_group:
-                opacity = float(st["ghost_opacity"])
+            opacity = float(st["translucent_opacity"]) if mode == "translucent" else 1.0
+            if req.ghost > 0:
+                target = min(opacity, float(st["ghost_opacity"]))
+                opacity += (target - opacity) * min(float(req.ghost), 1.0)
             surf, edges = self._body_mesh(geom.key, name, mesh)
             p.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True,
                        specular=0.25, specular_power=20, diffuse=0.85, ambient=0.15)
@@ -166,6 +169,14 @@ class Renderer:
             if pd is not None:
                 p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
                            lighting=False)
+
+        for model, sk, alpha in req.overlays:
+            og = (overlay_geoms or {}).get(model)
+            lines = og.sketches.get(sk) if og is not None else None
+            pd = _polylines(lines) if lines else None
+            if pd is not None and alpha > 0:
+                p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
+                           opacity=float(alpha), lighting=False)
 
         if req.caption and st.get("captions", True):
             p.add_text(req.caption, position="upper_left", font_size=11, color="#333333",

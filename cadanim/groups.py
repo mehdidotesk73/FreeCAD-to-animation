@@ -52,6 +52,7 @@ DEFAULT_TIMING = {
     "growth_frames": 24,       # feature growth (intra-step)
     "appear_frames": 6,        # features without a growth animation
     "hold_frames": 8,          # static frames after each step
+    "sketch_fade_frames": 12,  # a profile sketch fades out over this many frames of its feature
     "transition_frames": 18,   # camera move between steps (inter-step)
     "intro_frames": 6,         # blank canvas at the start
     "finale_frames": 96,       # turntable of the finished model (0 = off)
@@ -63,7 +64,7 @@ DEFAULT_RENDER = {
     "transparent": True,       # alpha PNG frames; the video gets a background
     "background": "#ffffff",
     "translucent_opacity": 0.18,
-    "ghost_opacity": 0.35,     # active bodies while showing an occluded sketch
+    "ghost_opacity": 0.35,     # every body while a sketch step is shown (faded in/out)
     "feature_edges": True,
     "edge_color": "#222222",
     "sketch_color": "#111111",

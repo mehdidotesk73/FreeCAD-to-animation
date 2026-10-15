@@ -133,7 +133,8 @@ compile every unique state (parallel, cached) -> render every frame -> manifest.
 Each `manifest.frames[i]` holds `file`, `timestamp`, `frame_type`
 (`static` | `inter_step` | `intra_step`), `step_id`, `step_index`, `group`,
 `params` (the growing parameter values), `caption`, `camera`, `geometry_key`,
-`model` / `stl` (paths of that state's STLs), `reveal`, `ghost_active`,
+`model` / `stl` (paths of that state's STLs), `reveal`, `ghost` (0..1
+see-through amount), `overlays` (fading sketch lines),
 `context_modes` (body -> mode) and `state = {"upto": <last feature id>,
 "overrides": {feature: {prop: value}}}`. That pair reproduces the exact
 state from `tree.json`. `manifest.steps[]` gives each step's frame range,

@@ -56,18 +56,37 @@ def test_through_all_without_depth_appears(sample_tree):
     assert plan_growth(T.state_up_to(sample_tree, "PocketB"), "PocketB", 6) is None
 
 
-def test_polar_pattern_keeps_instance_positions(sample_tree):
+def test_polar_pattern_fixed_count_angle_opens(sample_tree):
     st = T.state_up_to(sample_tree, "PolarB")
     plan = plan_growth(st, "PolarB", 8)
-    seen = {}
-    for s in plan.states:
-        e = s["PolarB"]
-        seen[e["Occurrences"]] = e["Angle"]
-    assert sorted(seen) == [1, 2, 3, 4]
-    # 4 instances over a full circle sit at 90 degree spacing at every stage.
-    assert seen[2] == pytest.approx(90.0)
-    assert seen[3] == pytest.approx(180.0)
-    assert seen[4] == pytest.approx(360.0)
+    occ = [s["PolarB"]["Occurrences"] for s in plan.states]
+    angles = [s["PolarB"]["Angle"] for s in plan.states]
+    assert occ == [4] * 8                       # the final copy count from the first frame
+    assert angles == sorted(angles) and angles[0] > 0
+    # A full circle of 4 copies sits 90 deg apart; extent mode spaces copies
+    # Angle/(n-1), so the sweep ends at 270 deg and the last frame restores 360.
+    assert angles[-2] < 270.0 + 1e-9
+    assert angles[-1] == pytest.approx(360.0)
+
+
+def test_polar_pattern_partial_arc_and_spacing_mode(sample_tree):
+    st = T.with_overrides(T.state_up_to(sample_tree, "PolarB"), "PolarB", {"Angle": 120.0})
+    angles = [s["PolarB"]["Angle"] for s in plan_growth(st, "PolarB", 5).states]
+    assert angles[-1] == pytest.approx(120.0)
+    st = T.with_overrides(T.state_up_to(sample_tree, "PolarB"), "PolarB",
+                          {"Mode": "Spacing", "Offset": 30.0})
+    plan = plan_growth(st, "PolarB", 5)
+    assert [s["PolarB"]["Occurrences"] for s in plan.states] == [4] * 5
+    assert plan.states[-1]["PolarB"]["Offset"] == pytest.approx(30.0)
+
+
+def test_linear_pattern_fixed_count_length_grows(sample_tree):
+    st = T.with_overrides(T.state_up_to(sample_tree, "PolarB"), "PolarB",
+                          {"kind": "PartDesign::LinearPattern", "Length": 50.0, "Occurrences": 5})
+    plan = plan_growth(st, "PolarB", 6)
+    assert [s["PolarB"]["Occurrences"] for s in plan.states] == [5] * 6
+    lengths = [s["PolarB"]["Length"] for s in plan.states]
+    assert lengths == sorted(lengths) and lengths[-1] == pytest.approx(50.0)
 
 
 def test_sketch_reveal_is_render_only(sample_tree):

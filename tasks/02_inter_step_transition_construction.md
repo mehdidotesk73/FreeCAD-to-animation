@@ -41,27 +41,39 @@ FreeCAD world is Z-up.
    existing solid geometry is the context.
    `fit_distance` fits the sphere into the narrower of the two FOVs.
 3. **Candidates**: 30 standard directions (isometric octants, two elevated
-   rings, six axes). Sketches use their plane normal (both sides) plus +/-25
-   deg tilts.
+   rings, six axes). A sketch is always viewed **perpendicular to its
+   plane**; only the side (normal or opposite) is chosen.
 4. **Score** (`VisibilityProbe`, 240x180, unlit): visible target pixels
    past the *solid* context, measured with **exactly one render per
    candidate**. The step's scene is loaded once (`setup`); per candidate only
    the camera moves. Occluders are black and the target red, and red pixels
    are counted. The target is nudged 0.4% of the camera distance towards the
    camera so faces it shares with an occluder (cut walls) count as visible.
-   The unobstructed size (for ghosting) is measured only for the chosen view
-   (`unoccluded`, 1 extra render per sketch step). Read images with
+   Read images with
    `p.render()` + `p.image`; `p.screenshot()` can return a stale image there.
    Each score is
    `sqrt(visible/best) + elevation_bias * elevation_preference(d)
    + continuity_bias * max(0, d . prev_d)`. Sketch scores are multiplied by
    `|d . normal|` (face-on).
-5. **Hysteresis**: keep the previous direction if it scores at least
-   `hysteresis` x best. Never keep a direction that sees a new sketch
-   edge-on. If the direction is kept and the framing is within 25% / ±33%,
-   keep the whole previous view (no transition).
-6. **Ghosting**: if the best view still hides >20% of a sketch, its frames
-   draw the active bodies semi-transparent.
+5. **Hysteresis** (features only): keep the previous direction if it scores
+   at least `hysteresis` x best. If the direction is kept and the framing is
+   within 25% / ±33%, keep the whole previous view (no transition).
+
+## Sketch steps
+
+A sketch step runs in this order:
+
+1. **Turn and fade in.** The camera turns perpendicular to the sketch, and
+   during the same frames every body fades to `render.ghost_opacity` (frame
+   field `ghost` ramps 0 -> 1).
+2. **Draw.** The sketch is drawn progressively (`render_reveal`), then held.
+3. **Turn and fade out.** The next step's transition turns the camera to
+   that step's view while `ghost` ramps back to 0. If two views are equal,
+   the fade happens in place over `transition_frames / 2` frames.
+4. **Sketch fade-out.** When the feature that uses the sketch as its profile
+   starts growing, the sketch lines fade out over `timing.sketch_fade_frames`
+   frames instead of vanishing. These are frame `overlays`: lines taken from
+   the sketch step's own model folder and drawn with decreasing opacity.
 
 All of these knobs live in the project config under `"camera"` (defaults in
 `groups.DEFAULT_CAMERA`).

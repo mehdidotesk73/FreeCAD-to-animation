@@ -23,7 +23,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -110,7 +110,10 @@ class FrameSpec:
     modes: Mapping[str, str]          # body -> solid / translucent / hidden
     caption: str = ""
     params: Optional[Mapping[str, Any]] = None
-    ghost_active: bool = False
+    ghost: float = 0.0                # 0..1: how far every body is faded to see-through
+    # Sketch lines drawn on top of the state: (geometry key holding the sketch,
+    # sketch id, opacity). Used to fade a sketch out once its feature grows.
+    overlays: Tuple[Tuple[str, str, float], ...] = ()
 
 
 @dataclass
@@ -246,30 +249,20 @@ class ViewPlanner:
         override = self.step_override(step_id, entry)
         if override is not None:
             view = self._override_view(override, center, radius, prev_view)
-            ghost = bool(override.get("ghost", False))
-            if "ghost" not in override and role == "sketch" and target is not None:
-                vis, tot = self.probe.measure(occluders, target, view, is_lines)
-                ghost = tot > 0 and vis / tot < 0.8
-            return view, ghost
+            return view, bool(override.get("ghost", role == "sketch"))
 
-        if role == "sketch" and focus.get("normal"):
-            n = C.normalize(focus["normal"])
-            perp = C.normalize(np.cross(n, [0, 0, 1])) if abs(n[2]) < 0.95 else np.array([1.0, 0, 0])
-            perp2 = np.cross(n, perp)
-            cands = []
-            for s in (n, -n):
-                cands.append(s)
-                for ax in (perp, perp2):
-                    for ang in (-25, 25):
-                        cands.append(C.rotate_about(s, ax, math.radians(ang)))
-        else:
-            cands = C.candidate_directions()
         prev_dir = C.view_direction(prev_view) if prev_view else None
         normal = C.normalize(focus["normal"]) if role == "sketch" and focus.get("normal") else None
-        if prev_dir is not None and normal is not None and abs(float(np.dot(prev_dir, normal))) < 0.8:
-            prev_dir = None  # never keep a view that sees the new sketch edge-on
-        if prev_dir is not None:
-            cands = list(cands) + [prev_dir]
+        if normal is not None:
+            # Sketches are always seen perpendicular to their plane; only the
+            # side is chosen (visibility, then continuity with the previous view).
+            cands = [normal, -normal]
+            prev_candidate = False
+        else:
+            cands = C.candidate_directions()
+            prev_candidate = prev_dir is not None
+            if prev_candidate:
+                cands = list(cands) + [prev_dir]
 
         # One render per candidate: visible target pixels past the solid context.
         if target is not None:
@@ -291,17 +284,13 @@ class ViewPlanner:
         scored = [(score(d, v), d, v) for d, v in measured]
         best = max(scored, key=lambda x: x[0])
         chosen = best
-        if prev_dir is not None:
+        if prev_candidate:
             prev_entry = scored[-1]
             if prev_entry[0] >= float(cam["hysteresis"]) * best[0] and prev_entry[2] > 0:
                 chosen = prev_entry
         _, direction, vis = chosen
         view = self._view(center, radius, direction)
-        ghost = False
-        if role == "sketch" and target is not None:
-            # Only the chosen view needs the unobstructed size (1 extra render per step).
-            tot = self.probe.unoccluded(view)
-            ghost = tot > 0 and vis / tot < 0.8
+        ghost = role == "sketch"  # every body goes translucent while a sketch is drawn
 
         # Keep the previous view if it already frames this step well.
         if prev_view is not None and C.angle_between_views(view, prev_view) < 1.0:
@@ -343,10 +332,20 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
     compiler.compile_many(afters, focus=True, progress=log)
     compiler.compile_many(baselines, progress=log)
 
+    # Where each sketch's lines live: the model folder of its own finished step.
+    sketch_keys = {s: compiler.cached_key(afters[k], focus=True)
+                   for k, s in enumerate(queue) if ordered[s]["role"] == "sketch"}
+    fade_n = int(tm.get("sketch_fade_frames", 0))
+
+    def ramp(a: float, b: float, count: int) -> List[float]:
+        """``count`` values easing from a (exclusive) to b (inclusive)."""
+        return [a + (b - a) * C.ease((i + 1) / count, tm["easing"]) for i in range(count)]
+
     planner = ViewPlanner(cfg)
     frames: List[FrameSpec] = []
     steps: List[StepRecord] = []
     prev_view: Optional[dict] = None
+    prev_ghost = 0.0
     try:
         for k, step in enumerate(queue):
             entry = ordered[step]
@@ -372,6 +371,7 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
                              ghost=ghost)
             cap = _caption(k + 1, n, entry, group, rec.animation if growth else "")
             base_kw = dict(step_id=step, step_index=k + 1, group=group, modes=modes)
+            g_level = 1.0 if ghost else 0.0
 
             if k == 0:  # Tree_State_0 / intro: the canvas before anything is built
                 for _ in range(max(1, int(tm["intro_frames"]))):
@@ -379,30 +379,47 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
                                             step_id=None, step_index=0, group=group, modes=modes,
                                             caption=""))
             rec.first_frame = len(frames)
-            # Inter-step: camera move over the historical (pre-step) state.
+            # Inter-step: camera move over the historical (pre-step) state. The
+            # see-through amount eases from the previous step's level to this one's
+            # (into a sketch: everything fades to translucent while the camera turns
+            # perpendicular to it; out of a sketch: it fades back).
             if prev_view is not None and not C.views_equal(prev_view, view):
-                for cv in C.interpolate_camera(prev_view, view, int(tm["transition_frames"]) + 1,
-                                               tm["easing"])[1:]:
+                cams = C.interpolate_camera(prev_view, view, int(tm["transition_frames"]) + 1,
+                                            tm["easing"])[1:]
+                for cv, gv in zip(cams, ramp(prev_ghost, g_level, len(cams))):
                     frames.append(FrameSpec(state=baselines[k], camera=cv, frame_type=FRAME_INTER,
-                                            caption=cap, **base_kw))
-            # Intra-step: the feature grows under the fixed view.
+                                            caption=cap, ghost=gv, **base_kw))
+            elif prev_ghost != g_level:  # same view: fade in place
+                count = max(1, int(tm["transition_frames"]) // 2)
+                for gv in ramp(prev_ghost, g_level, count):
+                    frames.append(FrameSpec(state=baselines[k], camera=view, frame_type=FRAME_INTER,
+                                            caption=cap, ghost=gv, **base_kw))
+
+            # Frames showing the step itself: growth (or appear), then hold.
+            body_frames = []
             if growth:
                 for st, vals in zip(growth.states, growth.values):
-                    frames.append(FrameSpec(state=st, camera=view, frame_type=FRAME_INTRA,
-                                            caption=cap, params=vals, ghost_active=ghost, **base_kw))
+                    body_frames.append(dict(state=st, frame_type=FRAME_INTRA, params=vals))
             else:
-                for _ in range(int(tm["appear_frames"])):
-                    frames.append(FrameSpec(state=afters[k], camera=view, frame_type=FRAME_STATIC,
-                                            caption=cap, ghost_active=ghost, **base_kw))
-            for _ in range(int(tm["hold_frames"])):
-                frames.append(FrameSpec(state=afters[k], camera=view, frame_type=FRAME_STATIC,
-                                        caption=cap, ghost_active=ghost, **base_kw))
+                body_frames += [dict(state=afters[k], frame_type=FRAME_STATIC)] * int(tm["appear_frames"])
+            body_frames += [dict(state=afters[k], frame_type=FRAME_STATIC)] * int(tm["hold_frames"])
+            # The profile sketch has served its purpose: fade it out over the first
+            # frames of the feature instead of letting it vanish.
+            prof = entry.get("profile")
+            fading = prof in sketch_keys and fade_n > 0 and sketch_keys[prof]
+            for i, bf in enumerate(body_frames):
+                overlays = ()
+                if fading and i < fade_n:
+                    overlays = ((sketch_keys[prof], prof, round(1.0 - (i + 1) / (fade_n + 1), 4)),)
+                frames.append(FrameSpec(camera=view, caption=cap, ghost=g_level, overlays=overlays,
+                                        **bf, **base_kw))
             rec.last_frame = len(frames) - 1
             steps.append(rec)
             prev_view = view
+            prev_ghost = g_level
             log(f"  [{k + 1:>3}/{n}] {entry.get('body_label')}/{entry.get('label'):<16} "
                 f"{rec.animation:<28} view dir={np.round(C.view_direction(view), 2)}"
-                f"{'  (ghosted)' if ghost else ''}")
+                f"{'  (see-through)' if ghost else ''}")
 
         # Finale: turntable of the finished model (everything solid).
         nf = int(tm.get("finale_frames", 0))
@@ -419,9 +436,11 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
                 all_solid = G.body_modes(cfg, ordered, None)
                 kw = dict(step_id="finale", step_index=n + 1, group=None, modes=all_solid,
                           caption="Finished model")
-                for cv in C.interpolate_camera(prev_view, start, int(tm["transition_frames"]) + 1,
-                                               tm["easing"])[1:]:
-                    frames.append(FrameSpec(state=final_state, camera=cv, frame_type=FRAME_INTER, **kw))
+                cams = C.interpolate_camera(prev_view, start, int(tm["transition_frames"]) + 1,
+                                            tm["easing"])[1:]
+                for cv, gv in zip(cams, ramp(prev_ghost, 0.0, len(cams))):
+                    frames.append(FrameSpec(state=final_state, camera=cv, frame_type=FRAME_INTER,
+                                            ghost=gv, **kw))
                 for cv in C.orbit(start, nf):
                     frames.append(FrameSpec(state=final_state, camera=cv, frame_type=FRAME_INTER, **kw))
     finally:
@@ -443,7 +462,8 @@ def _render_chunk(args):
             req = dict(req)
             model = req.pop("model_dir")
             geom = load_model_dir(model, req["geometry_key"]) if model else EMPTY
-            r.render(FrameRequest(**req), geom)
+            overlays = {m: load_model_dir(m) for m, _, _ in req.get("overlays", ())}
+            r.render(FrameRequest(**req), geom, overlays)
     finally:
         r.close()
     return len(requests)
@@ -510,7 +530,9 @@ def _requests_from_manifest(manifest: Mapping[str, Any], outdir: str,
              "camera": fr["camera"],
              "output": os.path.join(outdir, fr["file"]),
              "active_group": fr["group"], "caption": fr["caption"], "reveal": fr["reveal"],
-             "modes": fr["context_modes"], "ghost_active": fr["ghost_active"]}
+             "modes": fr["context_modes"], "ghost": fr.get("ghost", 0.0),
+             "overlays": [(os.path.join(outdir, o["model"]), o["sketch"], o["opacity"])
+                          for o in fr.get("overlays", [])]}
             for fr in frames]
 
 
@@ -564,7 +586,9 @@ def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir
             "stl": stl,
             "reveal": {fid: e["render_reveal"] for fid, e in f.state.items()
                        if fid != T.META_KEY and "render_reveal" in e},
-            "ghost_active": f.ghost_active,
+            "ghost": round(float(f.ghost), 4),
+            "overlays": [{"model": f"{models_rel}/{k}", "sketch": sk, "opacity": a}
+                         for k, sk, a in f.overlays],
             "context_modes": dict(f.modes),
             "state": {"upto": T.last_feature(f.state), "overrides": T.diff_overrides(full, f.state)},
         })

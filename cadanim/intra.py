@@ -12,7 +12,8 @@ parameters (polar patterns change Occurrences *and* Angle) or a mode switch
     Pad / Pocket (ThroughAll, UpTo*)     -> temporary Type=Length 0 -> swept depth,
                                             final frame restores the original type
     Revolution / Groove (Angle, TwoAngles) -> Angle (+Angle2) 0 -> A
-    PolarPattern / LinearPattern         -> instances appear one at a time
+    PolarPattern                         -> all copies, Angle 0 -> final (Spacing mode: Offset)
+    LinearPattern                        -> all copies, Length 0 -> final (Spacing mode: Offset)
     Fillet                               -> Radius 0 -> R
     Chamfer                              -> Size 0 -> S
     Draft                                -> Angle 0 -> A
@@ -126,41 +127,48 @@ def _revolve(entry, focus, frames):
 
 
 def _polar(entry, focus, frames):
+    """All copies from the first frame; the pattern angle opens from 0 to final.
+
+    Extent mode spaces copies Angle/(n-1) apart, except a full 360 deg circle,
+    which uses 360/n. Sweeping to 360*(n-1)/n therefore ends on exactly the
+    final layout without a jump; the last frame restores the original Angle.
+    Spacing mode sweeps the per-copy Offset instead.
+    """
     n = int(entry.get("Occurrences", 1) or 1)
     if n < 2:
         return None
     angle = float(entry.get("Angle", 360.0) or 360.0)
-    spacing_mode = entry.get("Mode") == "Spacing"
-    full_circle = math.isclose(angle, 360.0, abs_tol=1e-6)
+    if entry.get("Mode") == "Spacing":
+        offset = float(entry.get("Offset", 0) or 0)
+        if offset <= 0:
+            return None
+        return (f"{n} copies, spacing 0 \u2192 {offset:g}\u00b0",
+                lambda t: {"Occurrences": n, "Offset": _scaled(offset, t)}, frames)
+    end = angle * (n - 1) / n if math.isclose(angle, 360.0, abs_tol=1e-6) else angle
 
     def at(t):
-        k = max(1, min(n, 1 + int(round(t * (n - 1)))))
-        if k == n:
+        if t >= 1.0:
             return {"Occurrences": n, "Angle": angle}
-        if spacing_mode:
-            return {"Occurrences": k}
-        # Keep each instance at its final position while adding instances.
-        step = angle / n if full_circle else angle / (n - 1)
-        return {"Occurrences": k, "Angle": step * (k - 1) if k > 1 else step}
-    return f"{n} instances", at, max(frames, n)
+        return {"Occurrences": n, "Angle": _scaled(end, t)}
+    return f"{n} copies, angle 0 \u2192 {angle:g}\u00b0", at, frames
 
 
 def _linear(entry, focus, frames):
+    """All copies from the first frame; the pattern length (or spacing) grows from 0."""
     n = int(entry.get("Occurrences", 1) or 1)
     if n < 2:
         return None
+    if entry.get("Mode") == "Spacing":
+        offset = float(entry.get("Offset", 0) or 0)
+        if offset <= 0:
+            return None
+        return (f"{n} copies, spacing 0 \u2192 {offset:g} mm",
+                lambda t: {"Occurrences": n, "Offset": _scaled(offset, t)}, frames)
     length = float(entry.get("Length", 0) or 0)
-    spacing_mode = entry.get("Mode") == "Spacing"
-
-    def at(t):
-        k = max(1, min(n, 1 + int(round(t * (n - 1)))))
-        if k == n:
-            return {"Occurrences": n, "Length": length}
-        if spacing_mode:
-            return {"Occurrences": k}
-        step = length / (n - 1)
-        return {"Occurrences": k, "Length": step * (k - 1) if k > 1 else step}
-    return f"{n} instances", at, max(frames, n)
+    if length <= 0:
+        return None
+    return (f"{n} copies, length 0 \u2192 {length:g} mm",
+            lambda t: {"Occurrences": n, "Length": _scaled(length, t)}, frames)
 
 
 def _dressup(prop, unit):
@@ -200,9 +208,6 @@ def plan_growth(step_state: dict, step_id: str, frames: int, focus: Optional[dic
     if spec is None:
         return None
     desc, overrides_at, n = spec
-    # Patterns are discrete: sample linearly so every instance gets equal time.
-    is_discrete = entry.get("role") == "pattern"
-    states = create_intra_step_iterator_fn(step_state, step_id, overrides_at, n,
-                                           "linear" if is_discrete else easing)
+    states = create_intra_step_iterator_fn(step_state, step_id, overrides_at, n, easing)
     values = [{k: s[step_id][k] for k in overrides_at(1.0)} for s in states]
     return GrowthPlan(step_id=step_id, description=desc, states=states, values=values)
