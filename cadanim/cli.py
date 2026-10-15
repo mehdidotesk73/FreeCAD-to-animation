@@ -92,7 +92,7 @@ def cmd_export(a):
 
 def _apply_preview(cfg: G.ProjectConfig) -> G.ProjectConfig:
     d = cfg.to_dict()
-    d["render"].update(width=640, height=360, anti_aliasing=None)
+    d["render"].update(width=640, height=360)
     for k in ("sketch_frames", "growth_frames", "transition_frames", "hold_frames", "finale_frames",
               "sketch_fade_frames"):
         d["timing"][k] = max(1, int(d["timing"][k]) // 2)

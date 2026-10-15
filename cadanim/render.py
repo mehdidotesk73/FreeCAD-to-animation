@@ -110,9 +110,13 @@ class Renderer:
         self.plotter = pv.Plotter(off_screen=True, window_size=(self.width, self.height),
                                   lighting="light_kit")
         self.plotter.set_background(st.get("background", "#ffffff"))
-        self.plotter.enable_depth_peeling(number_of_peels=6)
         aa = st.get("anti_aliasing")
         if aa:
+            # Depth peeling sorts overlapping translucent bodies correctly, but on
+            # OSMesa/EGL it only writes their alpha into transparent PNGs when
+            # anti-aliasing is on; without it translucent bodies vanish. So peel
+            # only together with anti-aliasing.
+            self.plotter.enable_depth_peeling(number_of_peels=6)
             self.plotter.enable_anti_aliasing(aa)
         self._mesh_cache: "OrderedDict[Tuple[str, str], Tuple[pv.PolyData, Optional[pv.PolyData]]]" = OrderedDict()
 
@@ -136,6 +140,12 @@ class Renderer:
         while len(self._mesh_cache) > 48:
             self._mesh_cache.popitem(last=False)
         return surf, edges
+
+    @staticmethod
+    def _line_nudge(view: Mapping) -> Tuple[float, float, float]:
+        """Sketch lines often lie exactly on a face or edge (a pad's rim); move
+        them 0.2% of the camera distance towards the camera so they stay on top."""
+        return tuple(view_direction(view) * 0.002 * float(view["Distance"]))
 
     def render(self, req: FrameRequest, geom: Geometry,
                overlay_geoms: Optional[Mapping[str, Geometry]] = None) -> None:
@@ -167,16 +177,18 @@ class Renderer:
                 continue
             pd = _polylines(lines, float(req.reveal.get(sk, 1.0)))
             if pd is not None:
-                p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
-                           lighting=False)
+                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
+                               lighting=False)
+                a.position = self._line_nudge(req.camera)
 
         for model, sk, alpha in req.overlays:
             og = (overlay_geoms or {}).get(model)
             lines = og.sketches.get(sk) if og is not None else None
             pd = _polylines(lines) if lines else None
             if pd is not None and alpha > 0:
-                p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
-                           opacity=float(alpha), lighting=False)
+                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
+                               opacity=float(alpha), lighting=False)
+                a.position = self._line_nudge(req.camera)
 
         if req.caption and st.get("captions", True):
             p.add_text(req.caption, position="upper_left", font_size=11, color="#333333",
