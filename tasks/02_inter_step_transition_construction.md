@@ -128,6 +128,14 @@ model store, so re-framing never recompiles:
   ```
   Optional keys: `distance_scale` and `focal_offset`. Rerun `animate`;
   transitions and holds are re-planned around the new view.
+* **Section cuts** (`cadanim/section.py`, viewer-only like cameras):
+  `"Groove": {"section": {"normal": [0, 1, 0]}}` cuts **every** body with a
+  plane through the step's feature centre (or `"origin": [x, y, z]`) during
+  the step's growth and hold frames. The normal is flipped so the half facing
+  the camera is removed. Cut faces are built from the cut outline
+  (`slice` + `vtkContourTriangulator`, holes included) and drawn
+  `render.section_shade` (0.85) times the body colour, i.e. slightly darker.
+  Sketch lines and fading overlays on the removed side are clipped too.
 * For frame-level edits, change `frames[i].camera` in `manifest.json` and run
   `python -m cadanim rerender OUT --frames i-j`. Derived fields are
   recomputed from `FocalPoint` / `Rotation` / `Distance`.

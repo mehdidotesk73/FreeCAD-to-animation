@@ -73,6 +73,7 @@ heuristics...).
 | `cadanim/geometry.py` | Layer 2: hash-keyed STL model store, `tree_to_model` |
 | `cadanim/stl.py` | binary STL read/write (shared by FreeCAD side and viewer) |
 | `cadanim/render.py` | offscreen frame renderer and visibility probe |
+| `cadanim/section.py` | section cuts in the viewer (plane cut + filled cut faces) |
 | `cadanim/camera.py` | view schema, quaternions, `interpolate_camera`, framing |
 | `cadanim/intra.py` | `create_intra_step_iterator`, feature-growth mapping |
 | `cadanim/groups.py` | groups, colours, context policy, defaults |

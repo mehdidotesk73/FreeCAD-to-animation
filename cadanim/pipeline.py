@@ -115,6 +115,7 @@ class FrameSpec:
     # Sketch lines drawn on top of the state: (geometry key holding the sketch,
     # sketch id, opacity). Used to fade a sketch out once its feature grows.
     overlays: Tuple[Tuple[str, str, float], ...] = ()
+    section: Optional[Mapping[str, Any]] = None  # {"normal", "origin"}: see cadanim/section.py
 
 
 @dataclass
@@ -394,6 +395,14 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
             view = planned_views[k]
             override = planner.step_override(step, entry) or {}
             ghost = bool(override.get("ghost", entry["role"] == "sketch"))
+            section = None
+            if override.get("section"):
+                from .section import normalize_section
+                spec = dict(override["section"])
+                if "origin" not in spec:  # through the centre of what the step changes
+                    fb = after_geom.focus.get("bbox") or after_geom.body_bbox([entry["body"]])
+                    spec["origin"] = list(C.bbox_sphere(fb)[0])
+                section = normalize_section(spec, C.view_direction(view))
             growth: Optional[GrowthPlan] = plan_growth(
                 afters[k], step,
                 tm["sketch_frames"] if entry["role"] == "sketch" else tm["growth_frames"],
@@ -446,7 +455,7 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
                 if fading and i < fade_n:
                     overlays = ((sketch_keys[prof], prof, round(1.0 - (i + 1) / (fade_n + 1), 4)),)
                 frames.append(FrameSpec(camera=view, caption=cap, ghost=g_level, overlays=overlays,
-                                        **bf, **base_kw))
+                                        section=section, **bf, **base_kw))
             rec.last_frame = len(frames) - 1
             steps.append(rec)
             prev_view = view
@@ -567,7 +576,8 @@ def _requests_from_manifest(manifest: Mapping[str, Any], outdir: str,
              "active_group": fr["group"], "caption": fr["caption"], "reveal": fr["reveal"],
              "modes": fr["context_modes"], "ghost": fr.get("ghost", 0.0),
              "overlays": [(os.path.join(outdir, o["model"]), o["sketch"], o["opacity"])
-                          for o in fr.get("overlays", [])]}
+                          for o in fr.get("overlays", [])],
+             "section": fr.get("section")}
             for fr in frames]
 
 
@@ -670,6 +680,7 @@ def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir
             "ghost": round(float(f.ghost), 4),
             "overlays": [{"model": f"{models_rel}/{k}", "sketch": sk, "opacity": a}
                          for k, sk, a in f.overlays],
+            "section": dict(f.section) if f.section else None,
             "context_modes": dict(f.modes),
             "state": {"upto": T.last_feature(f.state), "overrides": T.diff_overrides(full, f.state)},
         })

@@ -72,6 +72,7 @@ DEFAULT_RENDER = {
     "captions": True,
     "deflection": 0.1,         # tessellation tolerance (mm)
     "anti_aliasing": "ssaa",
+    "section_shade": 0.85,     # cut faces: this fraction of the body colour (slightly darker)
 }
 DEFAULT_CAMERA = {
     "view_angle": 24.0,        # narrower = less perspective distortion
@@ -94,7 +95,8 @@ DEFAULT_CAMERA = {
     # Manual per-step views, applied by the viewer (no FreeCAD rerun). Keyed by
     # feature id, label or "BodyLabel/FeatureLabel". Each value may use
     # direction [x,y,z] | azimuth/elevation (deg) | keep_previous, plus
-    # zoom, distance_scale, focal_offset [x,y,z] and ghost (bool).
+    # zoom, distance_scale, focal_offset [x,y,z], ghost (bool) and
+    # section {"normal": [x,y,z], "origin": [x,y,z] (default: feature centre)}.
     "step_views": {},
 }
 
