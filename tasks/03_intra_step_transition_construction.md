@@ -33,7 +33,7 @@ Length pockets.
 | Sketch | `render_reveal` 0 -> 1 | drawn by arc length; render-only, so no FreeCAD rebuilds |
 | Pad / Pocket, `Length` | `Length` 2% -> L | FreeCAD rejects zero length |
 | Pad / Pocket, `TwoLengths` | `Length`, `Length2` scaled together | |
-| Pad / Pocket, `ThroughAll` / `UpTo*` | temporary `Type=Length`, depth 0 -> `sweep_depth` | last frame restores the original Type exactly; `Midplane` doubles the depth |
+| Pad / Pocket, `ThroughAll` / `UpTo*` | `anim_sweep` 0 -> 1: the finished feature's material revealed in a slab around the sketch plane | compiler side (`fc/worker._swept_shape`). The slab grows from the material's nearest distance to the plane to its farthest, on both sides, so cuts through hollow parts make progress every frame. A Length pocket cannot reproduce ThroughAll in general. Last frame = exact feature |
 | Revolution / Groove, `Angle` | `Angle` 2% -> A | `TwoAngles` scales both |
 | PolarPattern | all copies from the first frame, `Angle` 2% -> final | `Occurrences` fixed at its final value. Extent mode spaces copies A/(n-1), except a full 360 deg circle (A/n), so a full circle sweeps to 360(n-1)/n (identical layout, no jump) and the last frame restores 360. `Mode=Spacing` sweeps `Offset` instead |
 | LinearPattern | all copies from the first frame, `Length` 2% -> final | `Mode=Spacing` sweeps `Offset` instead |
