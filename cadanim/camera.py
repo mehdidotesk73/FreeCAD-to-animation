@@ -257,3 +257,40 @@ def orbit(view: Dict, frames_count: int, degrees: float = 360.0,
         cols = [rotate_about(r0[:, j], axis, ang) for j in range(3)]
         out.append(complete_view({**view, "Rotation": list(quat_from_matrix(np.column_stack(cols)))}))
     return out
+
+
+def fit_box(direction: Vec, box: Sequence[float], view_angle: float, aspect: float,
+            margin: float = 1.1, zoom: float = 1.0, up_hint: Vec = WORLD_UP) -> Dict:
+    """View along ``direction`` (towards the eye) that frames ``box``'s outline.
+
+    Unlike ``fit_distance`` (which fits the bounding sphere), this projects the
+    8 box corners into the camera frame, centres the focal point on their
+    projected extent and moves the eye just far enough that every corner is
+    inside the perspective frustum (with ``margin``). Wide, flat parts fill
+    the frame instead of sitting small inside a sphere-sized margin.
+    """
+    rot = look_rotation(direction, up_hint)
+    r = quat_to_matrix(rot)
+    lo, hi = np.asarray(box[:3], float), np.asarray(box[3:], float)
+    c = (lo + hi) / 2
+    corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                        for z in (lo[2], hi[2])]) - c
+    local = corners @ r                      # columns: right, up, towards camera
+    ox = (local[:, 0].max() + local[:, 0].min()) / 2
+    oy = (local[:, 1].max() + local[:, 1].min()) / 2
+    v = math.radians(view_angle) / max(zoom, 1e-6)
+    tan_v = math.tan(v / 2)
+    tan_h = tan_v * aspect
+    need = local[:, 2] + margin * np.maximum(np.abs(local[:, 0] - ox) / tan_h,
+                                             np.abs(local[:, 1] - oy) / tan_v)
+    focal = c + r[:, 0] * ox + r[:, 1] * oy
+    dist = max(float(need.max()), 1e-3)
+    return complete_view({"FocalPoint": list(focal), "Rotation": rot, "Distance": dist,
+                          "Zoom": zoom, "ViewAngle": view_angle})
+
+
+def sphere_box(center: Vec, radius: float) -> List[float]:
+    """Axis-aligned cube whose half-diagonal is ``radius``."""
+    h = float(radius) / math.sqrt(3.0)
+    c = np.asarray(center, float)
+    return list(np.concatenate([c - h, c + h]))

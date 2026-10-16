@@ -6,6 +6,7 @@
     frame    CFG --step ID -o out.png          one frame via tree_to_model
     animate  CFG [-o DIR] [--group G] [--preview] [--plan-only] [--video]
     rerender OUTDIR [--frames A-B] [--video]   redraw frames from manifest + STLs (no FreeCAD)
+    sheet    OUTDIR                            review sheet: one tile per step (also written by animate)
     video    OUTDIR                            encode frames/ into an MP4
 
 FreeCAD only produces geometry: one STL per body for every compiled state
@@ -176,6 +177,11 @@ def cmd_rerender(a):
         print(encode_video(a.outdir, m["fps"], bg))
 
 
+def cmd_sheet(a):
+    from . import pipeline
+    print(pipeline.review_sheet(a.outdir))
+
+
 def cmd_video(a):
     with open(os.path.join(a.outdir, "manifest.json")) as fh:
         m = json.load(fh)
@@ -210,6 +216,7 @@ def main(argv=None):
     p.add_argument("--video", action="store_true")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2)))
     p.set_defaults(fn=cmd_rerender)
+    p = sub.add_parser("sheet"); p.add_argument("outdir"); p.set_defaults(fn=cmd_sheet)
     p = sub.add_parser("video"); p.add_argument("outdir"); p.add_argument("--background", default="#ffffff")
     p.set_defaults(fn=cmd_video)
 

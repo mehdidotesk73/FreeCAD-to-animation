@@ -75,15 +75,22 @@ DEFAULT_RENDER = {
 }
 DEFAULT_CAMERA = {
     "view_angle": 24.0,        # narrower = less perspective distortion
-    "margin": 1.12,
+    "margin": 1.12,            # breathing room around the framed outline
     "context_weight": 1.0,     # 1 = whole active body in frame; lower zooms towards the feature
     "focus_scale": 1.6,        # framing radius relative to the feature radius
     "small_feature_ratio": 0.25,  # features smaller than this (vs body) get zoomed in on ...
     "min_context": 0.65,       # ... but at least this much context weight is kept
-    "hysteresis": 0.9,         # keep the previous direction if it scores >= 90% of the best
+    "min_body_fraction": 0.5,  # a small body is framed at >= this share of the built assembly
     "elevation_bias": 0.35,    # preference for looking from above
-    "continuity_bias": 0.2,
     "probe_size": [240, 180],
+    # Sequence planning (cadanim/camplan.py): costs traded off across all steps.
+    "sequence": {
+        "quality": 3.0,         # per step: losing visibility / preferred elevation
+        "fixed_move": 1.0,      # per camera move (moves into/out of sketches always count)
+        "move": 1.0,            # per 90 deg of rotation
+        "home": 1.0,            # per 90 deg between 3D views separated by sketches
+        "min_visibility": 0.6,  # 3D steps: never below this share of the best visibility
+    },
     # Manual per-step views, applied by the viewer (no FreeCAD rerun). Keyed by
     # feature id, label or "BodyLabel/FeatureLabel". Each value may use
     # direction [x,y,z] | azimuth/elevation (deg) | keep_previous, plus

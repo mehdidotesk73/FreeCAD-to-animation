@@ -31,6 +31,7 @@ from . import camera as C
 from . import groups as G
 from . import tree as T
 from .geometry import Geometry, GeometryCompiler
+from .camplan import plan_sequence, shots
 from .intra import GrowthPlan, plan_growth
 
 FRAME_STATIC = "static"
@@ -129,6 +130,7 @@ class StepRecord:
     animation: str
     view: dict
     ghost: bool = False
+    shot: int = -1          # shared-camera shot id (-1 for sketch views)
     first_frame: int = -1
     last_frame: int = -1
 
@@ -152,13 +154,14 @@ def elevation_preference(direction, preferred_deg: float = 30.0) -> float:
 
 
 class ViewPlanner:
-    """Picks the 'optimal fixed perspective' for each step.
+    """Measures candidate views per step and turns planned directions into views.
 
-    Each candidate direction is scored by how many pixels of the step's
-    target (sketch wires, added/removed material, or the changed region of a
-    pattern) are visible past the solid context. A small bias favours
-    viewing from above and staying close to the previous direction, and
-    hysteresis avoids needless camera moves.
+    ``measure`` scores every candidate direction of a step by how many pixels
+    of its target (sketch wires, added/removed material, or the changed region
+    of a pattern) are visible past the solid context. One probe render per
+    candidate. The choice across the whole sequence is made by
+    ``cadanim.camplan.plan_sequence``; ``view_for`` frames the chosen
+    direction on a box (a step's own region, or its shot's shared region).
     """
 
     def __init__(self, cfg: G.ProjectConfig):
@@ -172,28 +175,29 @@ class ViewPlanner:
     def close(self):
         self.probe.close()
 
-    def _framing(self, focus_bbox, context_bbox):
-        """Framing sphere for a step.
+    def region(self, focus_bbox, context_bbox) -> List[float]:
+        """Framing box for a step.
 
-        With ``context_weight`` = 1 the whole active body (plus the feature)
-        is in view. Lower values move the centre towards the feature and
-        shrink the sphere, but never below the feature itself (scaled by
-        ``focus_scale``). Features smaller than ``small_feature_ratio`` of the
-        framed radius pull the camera in further.
+        With ``context_weight`` = 1 the whole active body plus the feature is
+        framed. Features smaller than ``small_feature_ratio`` of that region
+        pull the framing towards them (never below ``min_context``), but never
+        smaller than the feature itself (scaled by ``focus_scale``).
         """
         cam = self.cfg.camera
+        union = C.union_bbox([context_bbox, focus_bbox])
         fc, fr = C.bbox_sphere(focus_bbox)
-        uc, ur = C.bbox_sphere(C.union_bbox([context_bbox, focus_bbox]))
+        uc, ur = C.bbox_sphere(union)
         w = min(max(float(cam["context_weight"]), 0.0), 1.0)
-        # Small features on large bodies: zoom part of the way in.
         ratio = fr / max(ur, 1e-9)
         small = float(cam["small_feature_ratio"])
         if ratio < small:
             w *= max(float(cam["min_context"]), ratio / small)
+        if w >= 1.0:
+            return list(union)
         center = fc + w * (uc - fc)
         radius = max(fr * float(cam["focus_scale"]), ur * w,
                      float(np.linalg.norm(center - fc)) + fr, 1.0)
-        return center, radius
+        return C.sphere_box(center, radius)
 
     def step_override(self, step_id: str, entry: Mapping[str, Any]) -> Optional[dict]:
         """``camera.step_views`` entry for a step (by feature id, label or "Body/Label")."""
@@ -203,29 +207,43 @@ class ViewPlanner:
                 return table[k]
         return None
 
-    def _override_view(self, ov: Mapping[str, Any], center, radius, prev_view):
-        """Manual view: keys direction | azimuth+elevation | keep_previous,
-        plus optional zoom, distance_scale and focal_offset."""
-        if ov.get("keep_previous") and prev_view is not None:
-            return prev_view
+    @staticmethod
+    def override_direction(ov: Mapping[str, Any]) -> Optional[np.ndarray]:
         if "direction" in ov:
-            direction = C.normalize(ov["direction"])
-        elif "azimuth" in ov or "elevation" in ov:
-            direction = C.spherical(float(ov.get("azimuth", 45.0)), float(ov.get("elevation", 30.0)))
-        elif prev_view is not None:
-            direction = C.view_direction(prev_view)
+            return C.normalize(ov["direction"])
+        if "azimuth" in ov or "elevation" in ov:
+            return C.spherical(float(ov.get("azimuth", 45.0)), float(ov.get("elevation", 30.0)))
+        return None
+
+    def view_for(self, direction, region, override: Optional[Mapping[str, Any]] = None,
+                 outline: bool = True) -> dict:
+        """Frame ``region`` (a box) looking along ``direction``; apply override
+        zoom / distance_scale / focal_offset if given.
+
+        ``outline``: fit the box's projected outline (3D shots). Otherwise fit
+        its bounding sphere (sketch views): looking straight at a tall part,
+        its outline is narrow and outline framing would zoom in far more than
+        the shots around it."""
+        ov = override or {}
+        margin = float(self.cfg.camera["margin"])
+        if outline:
+            view = C.fit_box(direction, region, self.view_angle, self.aspect, margin=margin)
         else:
-            direction = C.spherical(45.0, 30.0)
-        center = np.asarray(center, float) + np.asarray(ov.get("focal_offset", [0, 0, 0]), float)
-        view = self._view(center, radius * float(ov.get("distance_scale", 1.0)), direction)
-        return C.complete_view({**view, "Zoom": float(ov.get("zoom", 1.0))})
+            center, radius = C.bbox_sphere(region)
+            view = C.make_view(center, direction,
+                               C.fit_distance(radius, self.view_angle, self.aspect, margin=margin),
+                               view_angle=self.view_angle)
+        if ov:
+            focal = np.asarray(view["FocalPoint"]) + np.asarray(ov.get("focal_offset", [0, 0, 0]), float)
+            view = C.complete_view({**view, "FocalPoint": list(focal),
+                                    "Distance": view["Distance"] * float(ov.get("distance_scale", 1.0)),
+                                    "Zoom": float(ov.get("zoom", 1.0))})
+        return view
 
-    def _view(self, center, radius, direction):
-        d = C.fit_distance(radius, self.view_angle, self.aspect, margin=float(self.cfg.camera["margin"]))
-        return C.make_view(center, direction, d, view_angle=self.view_angle)
-
-    def plan(self, step_id: str, entry: Mapping[str, Any], after: Geometry,
-             solid_bodies: Sequence[str], active_body_bbox, prev_view: Optional[dict]):
+    def measure(self, step_id: str, entry: Mapping[str, Any], after: Geometry,
+                solid_bodies: Sequence[str], active_body_bbox):
+        """Candidate directions of one step with their visibility and quality."""
+        from .camplan import StepCandidates
         from .render import as_lines, as_polydata
         cam = self.cfg.camera
         focus = after.focus
@@ -237,68 +255,62 @@ class ViewPlanner:
             target = as_polydata(after.focus_mesh)
         elif entry.get("body") in after.bodies:
             target = as_polydata(after.bodies[entry["body"]])
-        focus_bbox = focus.get("bbox") or active_body_bbox or after.body_bbox()
-        if focus_bbox is None:  # nothing to look at (should not happen for visual steps)
-            return prev_view, False
+        focus_bbox = focus.get("bbox") or active_body_bbox or after.body_bbox() or [-1, -1, -1, 1, 1, 1]
         # Context: the active body, or for the first sketch of a new body the
-        # solid geometry it is being placed against.
-        context_bbox = active_body_bbox or after.body_bbox(solid_bodies)
-        center, radius = self._framing(focus_bbox, context_bbox)
-        occluders = [as_polydata(after.bodies[b]) for b in solid_bodies if b in after.bodies]
+        # solid geometry it is being placed against. A body much smaller than
+        # what is already built is framed with some of that around it.
+        assembly = after.body_bbox(solid_bodies)
+        context_bbox = active_body_bbox or assembly
+        if active_body_bbox and assembly:
+            bc, br = C.bbox_sphere(active_body_bbox)
+            _, ar = C.bbox_sphere(assembly)
+            floor = float(cam.get("min_body_fraction", 0.5)) * ar
+            if br < floor:
+                context_bbox = C.union_bbox([active_body_bbox, C.sphere_box(bc, floor)])
+        region = self.region(focus_bbox, context_bbox)
 
-        override = self.step_override(step_id, entry)
-        if override is not None:
-            view = self._override_view(override, center, radius, prev_view)
-            return view, bool(override.get("ghost", role == "sketch"))
-
-        prev_dir = C.view_direction(prev_view) if prev_view else None
         normal = C.normalize(focus["normal"]) if role == "sketch" and focus.get("normal") else None
-        if normal is not None:
-            # Sketches are always seen perpendicular to their plane; only the
-            # side is chosen (visibility, then continuity with the previous view).
-            cands = [normal, -normal]
-            prev_candidate = False
-        else:
-            cands = C.candidate_directions()
-            prev_candidate = prev_dir is not None
-            if prev_candidate:
-                cands = list(cands) + [prev_dir]
+        # Sketches are always seen perpendicular to their plane; only the side is chosen.
+        dirs = [normal, -normal] if normal is not None else C.candidate_directions()
+        override = self.step_override(step_id, entry) or {}
+        fixed, keep_prev = None, False
+        od = self.override_direction(override)
+        if od is not None:
+            dirs = list(dirs) + [od]
+            fixed = len(dirs) - 1
+        elif override.get("keep_previous") and role != "sketch":
+            keep_prev = True
 
-        # One render per candidate: visible target pixels past the solid context.
         if target is not None:
-            self.probe.setup(occluders, target, is_lines)
-            measured = [(d, self.probe.visible(self._view(center, radius, d))) for d in cands]
+            self.probe.setup([as_polydata(after.bodies[b]) for b in solid_bodies if b in after.bodies],
+                             target, is_lines)
+            # Same scale for every direction (bounding sphere of the region):
+            # outline framing would zoom in on narrow outlines and inflate
+            # their pixel counts, making directions incomparable.
+            center, radius = C.bbox_sphere(region)
+            dist = C.fit_distance(radius, self.view_angle, self.aspect,
+                                  margin=float(self.cfg.camera["margin"]))
+            vis = [float(self.probe.visible(C.make_view(center, d, dist, view_angle=self.view_angle)))
+                   for d in dirs]
         else:
-            measured = [(d, 1) for d in cands]
-        best_vis = max(v for _, v in measured) or 1
+            vis = [1.0] * len(dirs)
+        best = max(vis) or 1.0
+        # sqrt: once most of the target is visible, a nicer angle matters more.
+        quality = [math.sqrt(v / best) + float(cam["elevation_bias"]) * elevation_preference(d)
+                   for d, v in zip(dirs, vis)]
+        return StepCandidates(step=step_id, role=role,
+                              dirs=tuple(tuple(float(x) for x in d) for d in dirs),
+                              vis=tuple(vis), quality=tuple(quality), region=tuple(region),
+                              fixed=fixed, keep_previous=keep_prev, body=str(entry.get("body", "")))
 
-        def score(d, vis):
-            # sqrt: once most of the target is visible, a nicer angle matters more.
-            s = math.sqrt(vis / best_vis) + float(cam["elevation_bias"]) * elevation_preference(d)
-            if normal is not None:  # sketches read best face-on
-                s *= abs(float(np.dot(d, normal)))
-            if prev_dir is not None:
-                s += float(cam["continuity_bias"]) * max(0.0, float(np.dot(d, prev_dir)))
-            return s
-
-        scored = [(score(d, v), d, v) for d, v in measured]
-        best = max(scored, key=lambda x: x[0])
-        chosen = best
-        if prev_candidate:
-            prev_entry = scored[-1]
-            if prev_entry[0] >= float(cam["hysteresis"]) * best[0] and prev_entry[2] > 0:
-                chosen = prev_entry
-        _, direction, vis = chosen
-        view = self._view(center, radius, direction)
-        ghost = role == "sketch"  # every body goes translucent while a sketch is drawn
-
-        # Keep the previous view if it already frames this step well.
-        if prev_view is not None and C.angle_between_views(view, prev_view) < 1.0:
-            pc = np.asarray(prev_view["FocalPoint"])
-            prev_r = radius * prev_view["Distance"] / view["Distance"]
-            if (np.linalg.norm(center - pc) < 0.25 * prev_r and 0.75 <= radius / prev_r <= 1.33):
-                view = prev_view
-        return view, ghost
+    def plan(self, step_id: str, entry: Mapping[str, Any], after: Geometry,
+             solid_bodies: Sequence[str], active_body_bbox, prev_view: Optional[dict] = None):
+        """Single-step view (the ``frame`` command): best candidate on its own."""
+        from .camplan import plan_sequence
+        c = self.measure(step_id, entry, after, solid_bodies, active_body_bbox)
+        j = plan_sequence([c], self.cfg.camera.get("sequence"))[0]
+        return (self.view_for(c.dirs[j], c.region, self.step_override(step_id, entry)),
+                bool((self.step_override(step_id, entry) or {}).get("ghost", entry.get("role") == "sketch")))
 
 
 # --------------------------------------------------------------------------
@@ -347,19 +359,41 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
     prev_view: Optional[dict] = None
     prev_ghost = 0.0
     try:
+        # --- camera plan for the whole sequence (task 02) ---------------------
+        cands = []
+        for k, step in enumerate(queue):
+            entry = ordered[step]
+            modes = G.body_modes(cfg, ordered, b2g[entry["body"]])
+            after_geom = compiler.compile(afters[k], focus=True)
+            if after_geom.info.get("errors") or after_geom.info.get("failed"):
+                log(f"warning: step {step} has FreeCAD errors: "
+                    f"{after_geom.info.get('errors') or after_geom.info.get('failed')}")
+            cands.append(planner.measure(step, entry, after_geom,
+                                         [b for b in after_geom.bodies if modes.get(b) == "solid"],
+                                         after_geom.body_bbox([entry["body"]])))
+        choice = plan_sequence(cands, cfg.camera.get("sequence"))
+        shot_ids = shots(cands, choice)
+        shot_region: Dict[int, List[float]] = {}
+        for c, sid in zip(cands, shot_ids):
+            if sid >= 0:
+                shot_region[sid] = C.union_bbox([shot_region.get(sid), list(c.region)])
+        planned_views = []
+        for k, (c, j, sid) in enumerate(zip(cands, choice, shot_ids)):
+            override = planner.step_override(queue[k], ordered[queue[k]])
+            region = shot_region[sid] if sid >= 0 else list(c.region)
+            planned_views.append(planner.view_for(c.dirs[j], region, override, outline=sid >= 0))
+        log(f"camera plan: {len(set(s for s in shot_ids if s >= 0))} shot(s) for "
+            f"{sum(1 for c in cands if not c.is_sketch)} 3D step(s), "
+            f"{sum(1 for c in cands if c.is_sketch)} sketch view(s)")
+
         for k, step in enumerate(queue):
             entry = ordered[step]
             group = b2g[entry["body"]]
             modes = G.body_modes(cfg, ordered, group)
             after_geom = compiler.compile(afters[k], focus=True)
-            solid_bodies = [b for b in after_geom.bodies if modes.get(b) == "solid"]
-            body_bbox = after_geom.body_bbox([entry["body"]])
-            if after_geom.info.get("errors") or after_geom.info.get("failed"):
-                log(f"warning: step {step} has FreeCAD errors: "
-                    f"{after_geom.info.get('errors') or after_geom.info.get('failed')}")
-            view, ghost = planner.plan(step, entry, after_geom, solid_bodies, body_bbox, prev_view)
-            if view is None:
-                view = prev_view
+            view = planned_views[k]
+            override = planner.step_override(step, entry) or {}
+            ghost = bool(override.get("ghost", entry["role"] == "sketch"))
             growth: Optional[GrowthPlan] = plan_growth(
                 afters[k], step,
                 tm["sketch_frames"] if entry["role"] == "sketch" else tm["growth_frames"],
@@ -368,7 +402,7 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
                              kind=entry["kind"], role=entry["role"], body=entry["body"],
                              body_label=entry.get("body_label", entry["body"]), group=group,
                              animation=growth.description if growth else "appear", view=view,
-                             ghost=ghost)
+                             ghost=ghost, shot=shot_ids[k])
             cap = _caption(k + 1, n, entry, group, rec.animation if growth else "")
             base_kw = dict(step_id=step, step_index=k + 1, group=group, modes=modes)
             g_level = 1.0 if ghost else 0.0
@@ -418,7 +452,8 @@ def plan_timeline(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, compiler: 
             prev_view = view
             prev_ghost = g_level
             log(f"  [{k + 1:>3}/{n}] {entry.get('body_label')}/{entry.get('label'):<16} "
-                f"{rec.animation:<28} view dir={np.round(C.view_direction(view), 2)}"
+                f"{rec.animation:<28} {'sketch view' if rec.shot < 0 else f'shot {rec.shot}':<10} "
+                f"dir={np.round(C.view_direction(view), 2)}"
                 f"{'  (see-through)' if ghost else ''}")
 
         # Finale: turntable of the finished model (everything solid).
@@ -560,6 +595,52 @@ def rerender(outdir: str, workers: int = 4, indices: Optional[Sequence[int]] = N
     return manifest
 
 
+def review_sheet(outdir: str, cols: int = 6, tile: Tuple[int, int] = (480, 270),
+                 log: Callable[[str], None] = _log) -> str:
+    """``<out>/steps_sheet.png``: one tile per step (its last frame) plus the finale.
+
+    Rendered directly from the stored models and the manifest's cameras, so it
+    works right after ``--plan-only`` too: the quick way to review a camera
+    plan without rendering the animation.
+    """
+    import tempfile
+    from PIL import Image, ImageDraw
+    from .geometry import EMPTY, load_model_dir
+    from .render import FrameRequest, Renderer, SceneSpec
+    with open(os.path.join(outdir, "manifest.json")) as fh:
+        manifest = json.load(fh)
+    with open(os.path.join(outdir, "config.json")) as fh:
+        cfg_d = json.load(fh)
+    cfg = G.from_dict(cfg_d, T.load(os.path.join(outdir, manifest["tree_file"])), base_dir=outdir)
+    picks = [(s, s["last_frame"]) for s in manifest["steps"] if s.get("last_frame") is not None]
+    if manifest["frames"] and manifest["frames"][-1]["step_id"] == "finale":
+        picks.append(({"step_index": "end", "label": "finished", "shot": None}, len(manifest["frames"]) - 1))
+    scene = _scene_dict(cfg)
+    scene["style"] = dict(scene["style"], width=tile[0], height=tile[1], transparent=False)
+    r = Renderer(SceneSpec(**scene))
+    rows = -(-len(picks) // cols)
+    sheet = Image.new("RGB", (tile[0] * cols, tile[1] * rows), "white")
+    draw = ImageDraw.Draw(sheet)
+    with tempfile.TemporaryDirectory() as tmp:
+        for n, (step, idx) in enumerate(picks):
+            req = _requests_from_manifest(manifest, outdir, [idx])[0]
+            model = req.pop("model_dir")
+            req["output"] = os.path.join(tmp, f"{n}.png")
+            shot = step.get("shot")
+            req["caption"] = (f"{step['step_index']} {step.get('body_label', '')}/{step['label']}"
+                              f"  [{'sketch' if shot == -1 else 'end' if shot is None else f'shot {shot}'}]")
+            geom = load_model_dir(model, req["geometry_key"]) if model else EMPTY
+            r.render(FrameRequest(**req), geom, {m: load_model_dir(m) for m, _, _ in req["overlays"]})
+            x, y = (n % cols) * tile[0], (n // cols) * tile[1]
+            sheet.paste(Image.open(req["output"]).convert("RGB"), (x, y))
+            draw.rectangle([x, y, x + tile[0] - 1, y + tile[1] - 1], outline="#bbbbbb")
+    r.close()
+    path = os.path.join(outdir, "steps_sheet.png")
+    sheet.save(path)
+    log(f"review sheet: {path}")
+    return path
+
+
 def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir: str,
                    compiler: GeometryCompiler) -> Dict[str, Any]:
     fps = float(cfg.timing["fps"])
@@ -641,4 +722,5 @@ def run(full_tree: Mapping[str, Any], cfg: G.ProjectConfig, outdir: str, *, cach
         manifest = render_timeline(tl, cfg, compiler, outdir, workers, log)
     if T.fingerprint(full_tree) != fp:
         raise AssertionError("the source tree was mutated during the pipeline run")
+    review_sheet(outdir, log=log)
     return manifest
