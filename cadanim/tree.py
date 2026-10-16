@@ -18,6 +18,9 @@ Conventions
   property values. Changing one of them changes the geometry the compiler
   builds (``state[step]["Length"] = 42.0``).
 * Lower-case keys are metadata (kind, role, body, deps, ...).
+* Keys starting with ``anim_`` are synthetic animation parameters the
+  compiler applies on top of the FreeCAD model (``anim_sweep`` reveals the
+  material of a ThroughAll/UpTo* feature progressively). They change geometry.
 * Keys starting with ``render_`` are presentation-only hints (for example
   ``render_reveal`` for drawing a sketch progressively). They are excluded
   from the geometry hash, so they never trigger a FreeCAD rebuild.
@@ -39,6 +42,10 @@ from typing import Any, Dict, Iterable, List, Mapping
 META_KEY = "__meta__"
 SCHEMA = "cadanim.tree/1"
 RENDER_PREFIX = "render_"
+# Synthetic animation parameters that change geometry but are not FreeCAD
+# properties (e.g. ``anim_sweep``: reveal a ThroughAll cut progressively).
+# Unlike ``render_*`` keys they are part of the geometry hash.
+ANIM_PREFIX = "anim_"
 
 # Feature roles assigned during extraction.
 VISUAL_ROLES = ("sketch", "additive", "subtractive", "pattern", "dressup")
@@ -167,7 +174,8 @@ def diff_overrides(full_tree: Mapping[str, Any], state: Mapping[str, Any]) -> Di
     for fid in feature_ids(state):
         base = full_tree.get(fid, {})
         delta = {k: v for k, v in state[fid].items()
-                 if (is_property_key(k) or k.startswith(RENDER_PREFIX)) and base.get(k) != v}
+                 if (is_property_key(k) or k.startswith((RENDER_PREFIX, ANIM_PREFIX)))
+                 and base.get(k) != v}
         if delta:
             out[fid] = delta
     return out

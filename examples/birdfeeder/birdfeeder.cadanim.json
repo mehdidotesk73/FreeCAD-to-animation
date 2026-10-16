@@ -16,7 +16,7 @@
   ],
   "context": {
     "default": "translucent",
-    "binding": "solid",
+    "binding": "translucent",
     "overrides": {}
   }
 }
