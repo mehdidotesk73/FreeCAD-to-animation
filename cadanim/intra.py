@@ -9,8 +9,9 @@ parameters (polar patterns change Occurrences *and* Angle) or a mode switch
 ``plan_growth`` maps a feature to its animation behaviour:
 
     Pad / Pocket (Length, TwoLengths)    -> Length (+Length2) 0 -> L
-    Pad / Pocket (ThroughAll, UpTo*)     -> temporary Type=Length 0 -> swept depth,
-                                            final frame restores the original type
+    Pad / Pocket (ThroughAll, UpTo*)     -> anim_sweep 0 -> 1: the finished feature's
+                                            material revealed in growing slabs from the
+                                            sketch plane (compiler side)
     Revolution / Groove (Angle, TwoAngles) -> Angle (+Angle2) 0 -> A
     PolarPattern                         -> all copies, Angle 0 -> final (Spacing mode: Offset)
     LinearPattern                        -> all copies, Length 0 -> final (Spacing mode: Offset)
@@ -103,15 +104,16 @@ def _sweep(entry, focus, frames):
     if typ == "TwoLengths" and (L1 > 0 or L2 > 0):
         return (f"Lengths 0 → {L1:g}/{L2:g} mm",
                 (lambda t: {"Length": _scaled(L1, t), "Length2": L2 * t}), frames)
-    depth = (focus or {}).get("sweep_depth")
-    if depth:
-        total = 2 * depth if entry.get("Midplane") else depth
-
+    if entry.get("role") in ("subtractive", "additive") and entry.get("profile"):
+        # ThroughAll / UpTo*: a Length feature cannot reproduce these in general
+        # (both sides of the sketch plane, air gaps before the material starts),
+        # so the compiler reveals the finished feature's material in growing
+        # slabs around the sketch plane instead. t = 1 is the exact feature.
         def at(t):
-            if t >= 1.0:
-                return {"Type": typ, "Length": L1}  # exact original definition
-            return {"Type": "Length", "Length": _scaled(total, t)}
-        return f"{typ}: depth 0 → {total:.3g} mm", at, frames
+            return {} if t >= 1.0 else {"anim_sweep": round(max(t, MIN_FRACTION), 4)}
+        depth = (focus or {}).get("sweep_depth")
+        size = f" {depth:.3g} mm" if depth else ""
+        return f"{typ}: cut grows to full depth{size}", at, frames
     return None
 
 
@@ -209,5 +211,6 @@ def plan_growth(step_state: dict, step_id: str, frames: int, focus: Optional[dic
         return None
     desc, overrides_at, n = spec
     states = create_intra_step_iterator_fn(step_state, step_id, overrides_at, n, easing)
-    values = [{k: s[step_id][k] for k in overrides_at(1.0)} for s in states]
+    values = [{k: v for k, v in s[step_id].items()
+               if k in overrides_at(1.0) or k.startswith(T.ANIM_PREFIX)} for s in states]
     return GrowthPlan(step_id=step_id, description=desc, states=states, values=values)

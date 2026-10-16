@@ -399,6 +399,45 @@ def _prune(doc, included):
     return removed
 
 
+def _swept_shape(doc, state, fid, t):
+    """Shape of ``fid``'s body with only part of the feature's material applied.
+
+    The finished feature's removed (or added) material is intersected with a
+    slab around the profile sketch plane whose half-thickness grows from where
+    the material starts to where it ends (both sides of the plane), so every
+    frame shows progress, unlike a Length pocket crossing a hollow interior.
+    Returns a body-local shape, or None when the sweep does not apply.
+    """
+    obj = doc.getObject(fid)
+    base = getattr(obj, "BaseFeature", None)
+    sk = doc.getObject(state[fid].get("profile") or "")
+    if base is None or base.Shape.isNull() or sk is None or sk.TypeId != "Sketcher::SketchObject":
+        return None
+    result = obj.Shape
+    subtractive = state[fid].get("role") == "subtractive"
+    region = base.Shape.cut(result) if subtractive else result.cut(base.Shape)
+    if region.isNull() or region.Volume < 1e-6:
+        return None
+    plane = sk.Placement                       # body-local, like the feature shapes
+    local = region.copy()
+    local.transformShape(plane.inverse().toMatrix())
+    big = 10.0 * region.BoundBox.DiagonalLength + 1.0
+    # Depth range where material actually is: from its nearest point to the
+    # sketch plane (not 0: the arch slot's two wall pieces start 22 mm out,
+    # past a hollow bore) to its farthest, on either side of the plane.
+    z0, z1 = local.BoundBox.ZMin, local.BoundBox.ZMax
+    plane_face = Part.makePlane(2 * big, 2 * big, FreeCAD.Vector(-big, -big, 0))
+    lo = float(local.distToShape(plane_face)[0])
+    hi = max(abs(z0), abs(z1))
+    depth = lo + max(0.0, min(1.0, float(t))) * (hi - lo)
+    slab = Part.makeBox(2 * big, 2 * big, 2 * depth, FreeCAD.Vector(-big, -big, -depth))
+    slab.Placement = plane.multiply(slab.Placement)
+    piece = region.common(slab)
+    if piece.isNull() or piece.Volume < 1e-9:
+        return base.Shape.copy()
+    return base.Shape.cut(piece) if subtractive else base.Shape.fuse(piece)
+
+
 def compile_state(source, state, deflection, focus, prune=True):
     t0 = time.time()
     timing = {}
@@ -424,12 +463,24 @@ def compile_state(source, state, deflection, focus, prune=True):
 
         out = {"bodies": {}, "sketches": {}, "errors": errors}
         meshes = {}  # STL file stem -> (vertices, faces)
+        # anim_sweep on the step being grown: replace its body's shape.
+        swept = {}
+        last = included[-1] if included else None
+        if last is not None and "anim_sweep" in state[last]:
+            shape = _swept_shape(doc, state, last, state[last]["anim_sweep"])
+            if shape is not None:
+                swept[state[last].get("body")] = shape
+                out["anim_sweep"] = state[last]["anim_sweep"]
         for name, b in active.items():
-            shp = b.Shape
-            if shp.isNull():
-                continue
-            shp = shp.copy()
-            shp.Placement = b.getGlobalPlacement()
+            if name in swept:
+                shp = swept[name].copy()
+                shp.Placement = b.getGlobalPlacement().multiply(shp.Placement)
+            else:
+                shp = b.Shape
+                if shp.isNull():
+                    continue
+                shp = shp.copy()
+                shp.Placement = b.getGlobalPlacement()
             meshes[name] = _tess(shp, deflection)
             out["bodies"][name] = {"bbox": _bbox_list(shp.BoundBox), "volume": float(shp.Volume),
                                    "stl": f"{name}.stl"}

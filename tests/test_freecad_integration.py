@@ -71,3 +71,28 @@ def test_pruned_build_matches_full_build(tree, tmp_path, step, overrides):
         assert p["bbox"] == pytest.approx(b["bbox"], abs=1e-6)
         assert len(pruned.bodies[name][1]) == len(full.bodies[name][1])  # same tessellation
     assert set(pruned.sketches) == set(full.sketches)
+
+
+# ThroughAll pockets are animated by revealing the finished cut's material in
+# growing slabs (anim_sweep), not by switching to a Length pocket, which for
+# the arch slot (both walls, hollow bore in between) removed nothing for most
+# of the animation.
+@pytest.mark.parametrize("step,body", [("Pocket004", "Body001"), ("Pocket003", "Body")])
+def test_through_all_sweep_removes_material_progressively(tree, tmp_path, step, body):
+    from cadanim.geometry import GeometryCompiler
+    comp = GeometryCompiler(MODEL, str(tmp_path), workers=4)
+    before = T.state_up_to(tree, tree_prev(tree, step))
+    full = T.state_up_to(tree, step)
+    states = [before] + [T.with_overrides(full, step, {"anim_sweep": t}) for t in (0.25, 0.5, 0.75)] + [full]
+    keys = comp.compile_many(states)
+    vols = [comp.load(k).info["bodies"][body]["volume"] for k in keys]
+    removed = [vols[0] - v for v in vols[1:]]
+    assert removed[0] > 0                                            # cutting from the first quarter
+    assert all(a < b for a, b in zip(removed, removed[1:]))          # strictly growing
+    assert removed[-2] < removed[-1]                                 # sweep stops short of the end
+    assert comp.load(keys[-2]).info.get("anim_sweep") == 0.75
+
+
+def tree_prev(tree, step):
+    ids = T.feature_ids(tree)
+    return ids[ids.index(step) - 1]

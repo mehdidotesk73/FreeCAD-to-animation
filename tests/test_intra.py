@@ -43,17 +43,23 @@ def test_pad_growth(sample_tree):
     assert lengths[0] > 0 and lengths[-1] == pytest.approx(120.0)
 
 
-def test_through_all_pocket_uses_sweep_depth_and_restores_type(sample_tree):
+def test_through_all_pocket_sweeps_material_and_ends_exact(sample_tree):
     st = T.state_up_to(sample_tree, "PocketB")
     plan = plan_growth(st, "PocketB", 6, focus={"sweep_depth": 40.0})
-    assert all(s["PocketB"]["Type"] == "Length" for s in plan.states[:-1])
-    assert plan.states[-1]["PocketB"]["Type"] == "ThroughAll"
-    assert plan.states[-1]["PocketB"]["Length"] == 5.0  # original definition, exactly
-    assert plan.states[-2]["PocketB"]["Length"] < 40.0
+    sweeps = [s["PocketB"].get("anim_sweep") for s in plan.states]
+    assert all(s["PocketB"]["Type"] == "ThroughAll" for s in plan.states)   # never rewritten
+    assert sweeps[:-1] == sorted(sweeps[:-1]) and 0 < sweeps[0] < sweeps[-2] < 1
+    assert "anim_sweep" not in plan.states[-1]["PocketB"]                    # exact original
+    assert plan.states[-1]["PocketB"] == st["PocketB"]
+    # The sweep changes geometry, so every frame is a distinct model state.
+    assert len({T.geometry_hash(s) for s in plan.states}) == len(plan.states)
+    assert T.diff_overrides(sample_tree, plan.states[0]) == {"PocketB": {"anim_sweep": sweeps[0]}}
 
 
-def test_through_all_without_depth_appears(sample_tree):
-    assert plan_growth(T.state_up_to(sample_tree, "PocketB"), "PocketB", 6) is None
+def test_through_all_without_profile_appears(sample_tree):
+    st = T.state_up_to(sample_tree, "PocketB")
+    st["PocketB"].pop("profile")
+    assert plan_growth(st, "PocketB", 6) is None
 
 
 def test_polar_pattern_fixed_count_angle_opens(sample_tree):
