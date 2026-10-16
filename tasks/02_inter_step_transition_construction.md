@@ -29,35 +29,71 @@ FreeCAD world is Z-up.
 * `views_equal(a, b)` (angle < 0.5 deg, focal/distance within 1%) produces
   the spec's "zero-frame transition" for identical views.
 
-## Choosing View_k: `ViewPlanner.plan` (`cadanim/pipeline.py`)
+## Choosing the views: plan the whole sequence, not each step
 
-1. **Target** = what the step changes: the sketch polylines, or the
-   additive/removed material mesh, or the changed region of a
-   pattern/dress-up (from the compiler's focus data).
-2. **Framing sphere** (`_framing`): the union of the active body's bbox and
-   the target. With `camera.context_weight` = 1 the whole body is in view.
-   Targets smaller than `small_feature_ratio` of the body pull the camera in
-   (never below `min_context`). For the first sketch of a new body, the
-   existing solid geometry is the context.
-   `fit_distance` fits the sphere into the narrower of the two FOVs.
-3. **Candidates**: 30 standard directions (isometric octants, two elevated
-   rings, six axes). A sketch is always viewed **perpendicular to its
-   plane**; only the side (normal or opposite) is chosen.
-4. **Score** (`VisibilityProbe`, 240x180, unlit): visible target pixels
-   past the *solid* context, measured with **exactly one render per
-   candidate**. The step's scene is loaded once (`setup`); per candidate only
-   the camera moves. Occluders are black and the target red, and red pixels
-   are counted. The target is nudged 0.4% of the camera distance towards the
-   camera so faces it shares with an occluder (cut walls) count as visible.
-   Read images with
-   `p.render()` + `p.image`; `p.screenshot()` can return a stale image there.
-   Each score is
-   `sqrt(visible/best) + elevation_bias * elevation_preference(d)
-   + continuity_bias * max(0, d . prev_d)`. Sketch scores are multiplied by
-   `|d . normal|` (face-on).
-5. **Hysteresis** (features only): keep the previous direction if it scores
-   at least `hysteresis` x best. If the direction is kept and the framing is
-   within 25% / ±33%, keep the whole previous view (no transition).
+Picking each step's best view on its own makes the camera wander. Views are
+therefore planned for the whole sequence at once.
+
+### 1. Measure (`ViewPlanner.measure`, `cadanim/pipeline.py`)
+
+For every step:
+
+* **Target** = what the step changes: the sketch polylines, or the
+  additive/removed material mesh, or the changed region of a
+  pattern/dress-up (from the compiler's focus data).
+* **Region** (`ViewPlanner.region`, a box): the union of the active body's
+  bbox and the target. Targets smaller than `small_feature_ratio` pull the
+  region towards them (never below `min_context`). A body smaller than
+  `min_body_fraction` of the already-built assembly is framed with some of
+  the assembly around it. For the first sketch of a new body, the existing
+  solid geometry is the context.
+* **Candidates**: 30 standard directions for 3D steps. A sketch has exactly
+  two: perpendicular to its plane, from either side.
+* **Visibility** (`VisibilityProbe`, 240x180, unlit, **one render per
+  candidate**): target pixels visible past the *solid* context. Occluders
+  are black and the target red; the target is nudged 0.4% of the camera
+  distance towards the camera so faces it shares with an occluder (cut
+  walls) count. Every candidate uses the same scale (the region's bounding
+  sphere), so pixel counts are comparable between directions. Read images
+  with `p.render()` + `p.image`; `p.screenshot()` can return a stale image.
+* **Quality** = `sqrt(visible/best) + elevation_bias * elevation_preference(d)`.
+
+### 2. Plan (`cadanim/camplan.py`, pure and unit-tested)
+
+`plan_sequence` chooses one candidate per step by dynamic programming,
+minimising (weights in `camera.sequence`):
+
+    quality    x (best quality - chosen quality)        per step
+    fixed_move x number of camera moves
+    move       x rotation / 90 deg                      per move
+    home       x angle between 3D views separated by sketches / 90 deg
+
+3D candidates below `min_visibility` (60%) of the step's best are not
+allowed. A move into or out of a sketch always counts as a move (the framing
+changes even when the direction does not).
+
+The effect: a pocket that reads fine from the next pattern's angle is shown
+from that angle, so the camera goes sketch -> that view once, and the pattern
+follows with no move. A sequence like revolve / sketch / pocket / pattern
+comes back to the revolve's view after the sketch.
+
+### 3. Shots and framing
+
+`shots` groups consecutive 3D steps **of the same body** on the same
+direction (sketches in between included) into a shot. All steps of a shot
+share one framing: the union of their regions. Within a shot the camera does
+not move at all, and after a sketch it returns to exactly the same view.
+
+3D views fit the region box's **projected outline** (`camera.fit_box`), so
+wide, flat parts fill the frame. Sketch views fit the bounding sphere, which
+keeps a steady scale when looking straight at a tall part.
+
+### Review sheet
+
+Every run writes `<out>/steps_sheet.png`: one tile per step (its last
+frame), labelled with its shot. `--plan-only` plus the sheet reviews a camera
+plan in about a minute without rendering the animation; `cadanim sheet OUT`
+rebuilds it.
 
 ## Sketch steps
 

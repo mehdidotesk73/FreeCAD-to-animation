@@ -224,6 +224,10 @@ class VisibilityProbe:
         self.size = (int(size[0]), int(size[1]))
         self.p = pv.Plotter(off_screen=True, window_size=self.size, lighting="none")
         self.p.set_background("white")
+        # No multisampling: blended edge pixels would turn thin red targets pink
+        # (over the white background) or dark red (over black occluders), so
+        # counts would depend on what is behind the target.
+        self.p.ren_win.SetMultiSamples(0)
         self.p.show(auto_close=False)  # screenshots require an initial render
         self._target = None
         self._occluders: List = []
