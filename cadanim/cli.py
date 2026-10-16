@@ -157,7 +157,7 @@ def encode_video(outdir: str, fps: float, background: str = "#ffffff") -> str:
     bg = background.lstrip("#")
     cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-framerate", str(fps), "-i", frames,
            "-filter_complex",
-           f"color=c=0x{bg}:s=16x16[bg];[bg][0:v]scale2ref[bg2][fg];[bg2][fg]overlay=shortest=1:format=auto,format=yuv420p",
+           f"color=c=0x{bg}:s=16x16[bg];[bg][0:v]scale2ref[bg2][fg];[bg2][fg]overlay=shortest=1:format=auto,setsar=1,format=yuv420p",
            "-c:v", "libx264", "-crf", "20", "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True)
     return out
