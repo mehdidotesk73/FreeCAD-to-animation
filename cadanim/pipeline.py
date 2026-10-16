@@ -30,7 +30,7 @@ import numpy as np
 from . import camera as C
 from . import groups as G
 from . import tree as T
-from .geometry import Geometry, GeometryCompiler
+from .geometry import Geometry, GeometryCompiler, info_ok
 from .camplan import plan_sequence, shots
 from .intra import GrowthPlan, plan_growth
 
@@ -540,7 +540,7 @@ def render_timeline(tl: Timeline, cfg: G.ProjectConfig, compiler: GeometryCompil
     kept: List[tuple] = []
     dropped = 0
     for f, k in zip(tl.frames, keys):
-        if f.frame_type == FRAME_INTRA and not compiler.load(k).ok:
+        if f.frame_type == FRAME_INTRA and not info_ok(compiler.info(k)):
             dropped += 1
             continue
         kept.append((f, k))
@@ -648,9 +648,9 @@ def write_manifest(tl: Timeline, cfg: G.ProjectConfig, kept: List[tuple], outdir
     models_rel = os.path.relpath(compiler.cache_dir, os.path.abspath(outdir))
     frames = []
     for i, (f, key) in enumerate(kept):
-        g = compiler.load(key) if key else None
         model = None if (not key or key == "empty") else f"{models_rel}/{key}"
-        stl = {b: f"{model}/{v.get('stl', b + '.stl')}" for b, v in (g.info.get("bodies", {}) if g else {}).items()} if model else {}
+        bodies = compiler.info(key).get("bodies", {}) if model else {}
+        stl = {b: f"{model}/{v.get('stl', b + '.stl')}" for b, v in bodies.items()}
         frames.append({
             "index": i,
             "file": f"frames/frame_{i:05d}.png",

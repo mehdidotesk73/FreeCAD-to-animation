@@ -48,7 +48,7 @@ class Geometry:
 
     @property
     def ok(self) -> bool:
-        return not self.info.get("errors") and not self.info.get("failed")
+        return info_ok(self.info)
 
     @property
     def focus(self) -> Dict:
@@ -58,6 +58,11 @@ class Geometry:
         from .camera import union_bbox
         b = self.info.get("bodies", {})
         return union_bbox(v["bbox"] for n, v in b.items() if names is None or n in names)
+
+
+def info_ok(info: Dict) -> bool:
+    """A compiled state is usable when FreeCAD reported no errors and it did not fail."""
+    return not info.get("errors") and not info.get("failed")
 
 
 EMPTY = Geometry(key="empty", bodies={}, sketches={}, info={"bodies": {}, "sketches": {}, "errors": []})
@@ -141,10 +146,25 @@ class GeometryCompiler:
             return EMPTY
         return _load_geometry(self._base(key), key)
 
+    def info(self, key: str) -> Dict:
+        """Only a state's ``info.json`` (bodies, errors, focus...): no STLs are read.
+
+        Use this for status and bookkeeping; ``load`` reads and merges every
+        body's STL and is only needed to draw or measure geometry."""
+        if key == "empty":
+            return EMPTY.info
+        return _load_info(os.path.join(self._base(key), "info.json"))
+
 
 def load_model_dir(path: str, key: Optional[str] = None) -> Geometry:
     """Load a compiled state folder (info.json + STLs). No FreeCAD involved."""
     return _load_geometry(os.path.abspath(path), key or os.path.basename(os.path.normpath(path)))
+
+
+@lru_cache(maxsize=4096)
+def _load_info(path: str) -> Dict:
+    with open(path) as fh:
+        return json.load(fh)
 
 
 @lru_cache(maxsize=64)
