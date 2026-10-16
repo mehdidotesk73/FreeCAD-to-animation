@@ -10,7 +10,7 @@ Read this file first. The three task files in `tasks/` cover the layers in depth
 | Task file | Layer | Code |
 |---|---|---|
 | `tasks/01_major_frame_construction.md` | Layer 1 data + Layer 2 geometry | `cadanim/tree.py`, `cadanim/fc/worker.py`, `cadanim/geometry.py`, `cadanim/render.py` |
-| `tasks/02_inter_step_transition_construction.md` | camera / inter-step | `cadanim/camera.py`, `ViewPlanner` in `cadanim/pipeline.py` |
+| `tasks/02_inter_step_transition_construction.md` | camera / inter-step | `cadanim/camera.py`, `cadanim/camplan.py`, `ViewPlanner` in `cadanim/pipeline.py` |
 | `tasks/03_intra_step_transition_construction.md` | feature growth / intra-step | `cadanim/intra.py` |
 
 Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
@@ -74,9 +74,9 @@ Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
      config and rerun `animate` (every state is already in the model store, so
      only the viewer runs), or edit cameras in `manifest.json` and run
      `python -m cadanim rerender OUT [--frames A-B] [--video]`.
-6. **Review** the output before handing it over: open a contact sheet of the
-   last frame of every step (`manifest.json` -> `steps[].last_frame`) and
-   watch the MP4. Tune `camera` / `timing` / `render` in the config rather
+6. **Review** the output before handing it over: look at
+   `<out>/steps_sheet.png` (one tile per step, written by every run,
+   including `--plan-only`) and watch the MP4. Tune `camera` / `timing` / `render` in the config rather
    than the code when a view or pacing looks off.
 
 ## Pipeline contract (Layer 3 coordination)
@@ -84,8 +84,10 @@ Orchestration (Layer 3) and the frame sequencer and manifest (Layer 4) live in
 ```
 FCStd --extract--> full tree (immutable)
       --order_tree(groups)--> ordered tree --action_queue--> [step ids]
+candidates_k = ViewPlanner.measure(...) for every step            # task 02
+views = plan_sequence(candidates) + shots (shared framing)        # task 02, cadanim/camplan.py
 for each step k:
-    view_k            = ViewPlanner.plan(...)                     # task 02
+    view_k            = views[k]
     inter-step frames = interpolate_camera(view_{k-1}, view_k)    # task 02 (skipped if equal)
                         over the *historical* state (everything before step k)
     intra-step frames = plan_growth(state_k, step) under view_k   # task 03
