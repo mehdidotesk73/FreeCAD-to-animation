@@ -164,10 +164,10 @@ class Renderer:
                 target = min(opacity, float(st["ghost_opacity"]))
                 opacity += (target - opacity) * min(float(req.ghost), 1.0)
             surf, edges = self._body_mesh(geom.key, name, mesh)
-            p.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True,
+            p.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True, render=False,
                        specular=0.25, specular_power=20, diffuse=0.85, ambient=0.15)
             if edges is not None:
-                p.add_mesh(edges, color=st["edge_color"], line_width=1.0,
+                p.add_mesh(edges, color=st["edge_color"], line_width=1.0, render=False,
                            opacity=0.55 if opacity == 1.0 else opacity * 0.6, lighting=False)
 
         for sk, lines in geom.sketches.items():
@@ -177,7 +177,7 @@ class Renderer:
                 continue
             pd = _polylines(lines, float(req.reveal.get(sk, 1.0)))
             if pd is not None:
-                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
+                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]), render=False,
                                lighting=False)
                 a.position = self._line_nudge(req.camera)
 
@@ -186,15 +186,18 @@ class Renderer:
             lines = og.sketches.get(sk) if og is not None else None
             pd = _polylines(lines) if lines else None
             if pd is not None and alpha > 0:
-                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]),
+                a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]), render=False,
                                opacity=float(alpha), lighting=False)
                 a.position = self._line_nudge(req.camera)
 
         if req.caption and st.get("captions", True):
-            p.add_text(req.caption, position="upper_left", font_size=11, color="#333333",
+            p.add_text(req.caption, position="upper_left", font_size=11, color="#333333", render=False,
                        name="caption")
         apply_camera(p, req.camera)
         os.makedirs(os.path.dirname(os.path.abspath(req.output)), exist_ok=True)
+        # screenshot() does not re-render once the window exists: without this
+        # explicit render every frame would save the *previous* frame's image.
+        p.render()
         p.screenshot(req.output, transparent_background=bool(st.get("transparent", True)))
 
 
