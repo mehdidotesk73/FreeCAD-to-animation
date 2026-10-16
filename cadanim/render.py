@@ -24,6 +24,7 @@ import pyvista as pv  # noqa: E402
 pv.OFF_SCREEN = True
 
 from .camera import view_direction  # noqa: E402
+from .section import cap_color, cut_lines, cut_surface  # noqa: E402
 from .geometry import Geometry, Mesh  # noqa: E402
 
 
@@ -46,6 +47,9 @@ class FrameRequest:
     ghost: float = 0.0  # 0..1: fade every body towards ghost_opacity (sketch steps)
     # (model folder holding the sketch, sketch id, opacity): fading profile sketches
     overlays: Sequence[Tuple[str, str, float]] = ()
+    # Section cut {"normal", "origin"}: every body is cut, the side the normal
+    # points to is removed, and the cut faces are filled (cadanim/section.py).
+    section: Optional[Mapping[str, Sequence[float]]] = None
 
 
 def _polydata(mesh: Mesh) -> pv.PolyData:
@@ -136,10 +140,10 @@ class Renderer:
                                              non_manifold_edges=False, manifold_edges=False)
             if edges.n_points == 0:
                 edges = None
-        self._mesh_cache[ck] = (surf, edges)
+        self._mesh_cache[ck] = (surf, edges, pd)
         while len(self._mesh_cache) > 48:
             self._mesh_cache.popitem(last=False)
-        return surf, edges
+        return surf, edges, pd
 
     @staticmethod
     def _line_nudge(view: Mapping) -> Tuple[float, float, float]:
@@ -163,9 +167,19 @@ class Renderer:
             if req.ghost > 0:
                 target = min(opacity, float(st["ghost_opacity"]))
                 opacity += (target - opacity) * min(float(req.ghost), 1.0)
-            surf, edges = self._body_mesh(geom.key, name, mesh)
-            p.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True, render=False,
-                       specular=0.25, specular_power=20, diffuse=0.85, ambient=0.15)
+            surf, edges, closed = self._body_mesh(geom.key, name, mesh)
+            cap = None
+            if req.section:
+                surf, cap = cut_surface(surf, closed, req.section)
+                edges = cut_lines(edges, req.section)
+                if surf.n_points == 0 and cap is None:
+                    continue
+            if surf.n_points:
+                p.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True, render=False,
+                           specular=0.25, specular_power=20, diffuse=0.85, ambient=0.15)
+            if cap is not None:
+                p.add_mesh(cap, color=cap_color(color, float(st.get("section_shade", 0.85))),
+                           opacity=opacity, render=False, specular=0.1, diffuse=0.85, ambient=0.2)
             if edges is not None:
                 p.add_mesh(edges, color=st["edge_color"], line_width=1.0, render=False,
                            opacity=0.55 if opacity == 1.0 else opacity * 0.6, lighting=False)
@@ -176,6 +190,8 @@ class Renderer:
             if body and req.modes.get(body, "solid") == "hidden":
                 continue
             pd = _polylines(lines, float(req.reveal.get(sk, 1.0)))
+            if req.section:
+                pd = cut_lines(pd, req.section)
             if pd is not None:
                 a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]), render=False,
                                lighting=False)
@@ -185,6 +201,8 @@ class Renderer:
             og = (overlay_geoms or {}).get(model)
             lines = og.sketches.get(sk) if og is not None else None
             pd = _polylines(lines) if lines else None
+            if req.section:
+                pd = cut_lines(pd, req.section)
             if pd is not None and alpha > 0:
                 a = p.add_mesh(pd, color=st["sketch_color"], line_width=float(st["sketch_width"]), render=False,
                                opacity=float(alpha), lighting=False)
